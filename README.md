@@ -13,3 +13,4 @@ This is the project for open source software.
 | 周珠晗 | zhaociyuewan@outlook.com| 51285903123 |
 | 卢雨凝 | ynlu@stu.ecnu.edu.cn    | 51285903096 |
 | 陆骏凯 | pandajunkai@163.com     | 51285903114 |
+| 张洳维 | ruruweizhang@gmail.com  | 50255903002 |
