@@ -50,11 +50,11 @@
 | Translation / Provider | 翻译 Prompt | YAML Prompt Template + PyYAML | 翻译策略可调整，避免 prompt 散落在代码里 | `PromptStore.load("translation")` | 张睿桐 |
 | Translation / Provider | 段落级翻译 | Segment extractor + TranslationAgent | 按段落翻译便于双语显示和失败重试 | `TranslationAgent.translate(article)` | 张睿桐 |
 | Translation / Provider | 翻译结果持久化 | SQLite | 保存 segment translation，避免重复翻译 | `TranslationStore.save_segments()` | 张睿桐、陈亦楠 |
-| 测试 / Review | 单元测试 | `pytest` | Python 标准测试生态，适合模块测试 | `tests/` | 晏康佳 |
-| 测试 / Review | GUI 测试 | `pytest-qt` | 可测试 Qt 窗口、按钮、信号 | `test_gui_smoke.py` | 晏康佳 |
-| 测试 / Review | HTTP mock | `httpx.MockTransport` 或 `respx` | 测试不依赖真实网络 | `test_feed_sync.py` | 晏康佳 |
-| 文档 / 其他 | 项目文档 | Markdown | 与 AI Coding Case Study 对齐，便于持续更新 | `README.md`、`PLAN.md` | 张妍维 |
-| 文档 / 其他 | AI 协作记录 | Markdown + 截图 | 记录 AI 生成、人工判断、Review 和风险 | 阶段总结、汇报材料 | 张妍维 |
+| 测试 / Review | 单元测试 | `pytest` | Python 标准测试生态，适合模块测试 | `tests/` | 晏康佳 张妍维 |
+| 测试 / Review | GUI 测试 | `pytest-qt` | 可测试 Qt 窗口、按钮、信号 | `test_gui_smoke.py` | 晏康佳 张妍维|
+| 测试 / Review | HTTP mock | `httpx.MockTransport` 或 `respx` | 测试不依赖真实网络 | `test_feed_sync.py` | 晏康佳 张妍维 |
+| 文档 / 其他 | 项目文档 | Markdown | 与 AI Coding Case Study 对齐，便于持续更新 | `README.md`、`PLAN.md` | 晏康佳 张妍维 |
+| 文档 / 其他 | AI 协作记录 | Markdown + 截图 | 记录 AI 生成、人工判断、Review 和风险 | 阶段总结、汇报材料 | 晏康佳 张妍维 |
 
 ## 4. 时间计划
 
