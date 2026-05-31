@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import httpx
+
+from reader.fetcher import SourceHtmlFetcher
+from reader.markdown_converter import html_to_markdown
+from reader.pipeline import ReaderPipelineService
+from reader.sanitizer import clean_reader_html
+
+
+ARTICLE_HTML = """
+<!doctype html>
+<html>
+  <head><title>Mercury Reader Test</title></head>
+  <body>
+    <header>Navigation</header>
+    <article>
+      <h1>Mercury Reader Test</h1>
+      <p>Reader mode keeps the useful paragraph.</p>
+      <p><a href="/about">About Mercury</a></p>
+      <img src="images/cover.png" onerror="alert(1)">
+      <script>alert("unsafe")</script>
+    </article>
+  </body>
+</html>
+"""
+
+
+def test_fetcher_follows_redirect_and_records_final_url() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://example.test/start":
+            return httpx.Response(302, headers={"Location": "/article"})
+        return httpx.Response(200, text=ARTICLE_HTML, request=request)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, follow_redirects=True) as client:
+        result = SourceHtmlFetcher().fetch("https://example.test/start", client=client)
+
+    assert result.source_url == "https://example.test/start"
+    assert result.final_url == "https://example.test/article"
+    assert "Reader mode keeps" in result.html
+
+
+def test_sanitizer_removes_script_and_repairs_relative_urls() -> None:
+    cleaned = clean_reader_html(
+        '<p><a href="/about">About</a><img src="cover.png" onerror="x"></p><script>x</script>',
+        "https://example.test/posts/one",
+    )
+
+    assert "script" not in cleaned
+    assert "onerror" not in cleaned
+    assert 'href="https://example.test/about"' in cleaned
+    assert 'src="https://example.test/posts/cover.png"' in cleaned
+
+
+def test_markdown_converter_preserves_links_and_images() -> None:
+    markdown = html_to_markdown(
+        '<h2>Title</h2><p><a href="https://example.test">Link</a></p>'
+        '<p><img src="https://example.test/a.png" alt="Cover"></p>'
+    )
+
+    assert "## Title" in markdown
+    assert "[Link](https://example.test)" in markdown
+    assert "![Cover](https://example.test/a.png)" in markdown
+
+
+def test_pipeline_builds_reader_document() -> None:
+    document = ReaderPipelineService().process_source_html(
+        ARTICLE_HTML,
+        source_url="https://example.test/posts/one",
+    )
+
+    assert document.title == "Mercury Reader Test"
+    assert "Reader mode keeps the useful paragraph." in document.cleaned_html
+    assert "Reader mode keeps the useful paragraph." in document.canonical_markdown
+    assert "<script>" not in document.reader_html
+    assert "https://example.test/about" in document.cleaned_html
