@@ -42,6 +42,7 @@ except ModuleNotFoundError as exc:
     raise SystemExit(1) from exc
 
 from mercury_feed import LocalFeedService
+from reader import ReaderPipelineService
 
 
 # -----------------------------
@@ -1210,7 +1211,7 @@ def main() -> int:
 
     window = MercuryMainWindow(
         feed_service=LocalFeedService(),
-        reader_pipeline=MockReaderPipeline(),
+        reader_pipeline=ReaderPipelineService(),
         summary_agent=MockSummaryAgent(),
         translation_agent=MockTranslationAgent(),
     )
