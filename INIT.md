@@ -1,5 +1,20 @@
 # Mercury PyQt Edition - INIT.md
 
+## 0. Implementation Progress (as of 2026-06-02)
+
+| Module | Owner | Status | Deliverable |
+|---|---|---|---|
+| GUI Shell | 卢雨凝 | ✅ Done | `mercury_gui.py` — PySide6 3-panel layout, Protocol interfaces, toolbar |
+| Feed / OPML | 汪琳丰 | ✅ Done | `mercury_feed.py` — RSS/Atom parser, OPML import, httpx sync |
+| Reader Pipeline | 周珠晗 | ✅ Done | `reader/` — fetcher, readability, sanitizer, markdown_converter, html_renderer, tests |
+| Local Storage | 陈亦楠 | ✅ Done | `mercury_storage.py`, `migrations/0001–0005` — SQLite + yoyo, 9 tables, 33 tests |
+| Summary Agent | 陆骏凯 | 🔲 In progress (6.5–6.12) | `SummaryStore` schema live; executor TBD |
+| Translation Agent | 张睿桐 | 🔲 In progress (6.5–6.12) | `TranslationStore` + `ProviderStore` schema live; executor TBD |
+| Agent Runtime | 全组 | 🔲 Planned | `agent_runs` table live; QThreadPool integration TBD |
+| Integration / MVP | 全组 | 🔲 Planned (6.12–6.15) | GUI wired to all real services |
+
+---
+
 ## 1. Project Goal
 
 Mercury PyQt Edition is a local-first, cross-platform AI RSS reader.
@@ -135,65 +150,71 @@ Risks:
 
 ### 4.3 Local Storage
 
-Recommended stack:
+**Actual decision (✅ implemented):**
+
+```text
+sqlite3 (Python standard library) + yoyo-migrations 8.x
+```
+
+Original recommended stack for later phases:
 
 ```text
 SQLite + SQLAlchemy 2.x
 ```
 
-Alternative for early MVP:
+Reason for MVP choice:
 
-```text
-sqlite3 from Python standard library
-```
+1. `sqlite3` is in the Python standard library: zero extra ORM dependency.
+2. `yoyo-migrations` manages schema versions with plain SQL files and automatic dependency ordering.
+3. SQLAlchemy can be introduced later if query composition becomes complex.
+4. Migration strategy is two-phase: Yoyo for MVP → Alembic + SQLAlchemy if needed post-6.12.
 
-Reason:
+Implemented schema (9 business tables across 5 migrations):
 
-1. SQLite is a single-file local database and matches the local-first constraint.
-2. It needs no server and works on all target platforms.
-3. SQLAlchemy gives migrations, typed models, query composition, and cleaner testing boundaries.
-4. Mercury needs structured persistence, not just JSON files.
+| Migration | Tables |
+|---|---|
+| 0001 | `feeds`, `entries` |
+| 0002 | `contents` (maps 1-to-1 to `ReaderDocument`), `tags` |
+| 0003 | `summary_results`, `translation_segments` (stubs for AI teams) |
+| 0004 | `provider_profiles`, `agent_runs` (stubs for AI teams) |
+| 0005 | `settings` (key-value UI preferences, seeded with `ui.language=zh-CN`) |
 
-Data to store:
+Store classes in `mercury_storage.py`:
 
-1. Feed subscriptions.
-2. Feed entries.
-3. Raw source HTML.
-4. Cleaned HTML.
-5. Canonical Markdown.
-6. Rendered HTML cache metadata.
-7. Summary results.
-8. Translation segments.
-9. Provider / model configuration metadata.
-10. Usage events.
-11. UI preferences.
+- `FeedStore` — upsert, list, get by URL/title, delete (cascade)
+- `EntryStore` — upsert, list with filters (feed/unread/starred), mark read/starred, count unread, tags
+- `ContentStore` — save/get/has `ReaderDocument`; interface for `reader/pipeline.py`
+- `SettingsStore` — key-value get/set, `current_language()` (satisfies `mercury_gui.SettingsStore` Protocol)
+- `SummaryStore`, `TranslationStore`, `ProviderStore` — schema live, implementation reserved for 陆骏凯 / 张睿桐
+
+`StorageService` is a drop-in replacement for `LocalFeedService`; `mercury_gui.py` now uses it directly.
 
 Risks:
 
 1. SQLite connection/threading policy must be explicit.
 2. Background workers should not share unsafe session objects with the GUI.
-3. Schema migrations need versioning from the beginning.
-4. Large article bodies can bloat the database; cache invalidation policy is needed.
+3. Large article bodies can bloat the database; cache invalidation policy is needed.
 
 ### 4.4 Feed Parsing and Sync
 
-Recommended stack:
+**Actual decision (✅ implemented):**
+
+```text
+xml.etree.ElementTree (stdlib) + httpx
+```
+
+Planned upgrade:
 
 ```text
 feedparser + httpx
 ```
 
-OPML:
+Reason for current choice:
 
-```text
-xml.etree.ElementTree
-```
-
-Reason:
-
-1. `feedparser` handles RSS and Atom compatibility.
-2. `httpx` provides timeouts, redirects, headers, and testable transport.
-3. OPML is XML, so Python's standard XML tools are sufficient for MVP.
+1. Stdlib XML parser avoids an extra dependency for MVP and is sufficient for RSS and Atom.
+2. `feedparser` remains in the plan for better format tolerance; can be swapped behind the same `LocalFeedService` interface without touching the GUI.
+3. `httpx` handles timeouts, redirects, and headers; feed discovery for sites that return HTML instead of XML is also implemented.
+4. OPML uses `xml.etree.ElementTree` and is working.
 
 Role in Mercury:
 
@@ -215,20 +236,22 @@ Risks:
 
 ### 4.5 Content Fetching and Reader Pipeline
 
-Recommended stack:
+**Actual decision (✅ implemented — `reader/` module, PR #1):**
 
 ```text
-httpx + readability-lxml + BeautifulSoup4 + markdownify + bleach
+httpx + readability-lxml + BeautifulSoup4 + markdownify + bleach + markdown-it-py
 ```
 
-Target pipeline:
+Implemented pipeline:
 
 ```text
 Feed entry / article URL
-  -> source HTML
-  -> cleaned HTML
-  -> canonical Markdown
-  -> reader HTML
+  -> SourceHtmlFetcher (reader/fetcher.py)
+  -> extract_readable_html (reader/readability.py)
+  -> clean_reader_html (reader/sanitizer.py)
+  -> html_to_markdown (reader/markdown_converter.py)
+  -> render_markdown_to_reader_html (reader/html_renderer.py)
+  -> ReaderDocument (reader/models.py)
 ```
 
 Reason:
@@ -256,10 +279,15 @@ Risks:
 
 ### 4.6 Reader Rendering
 
-Recommended stack:
+**Current status: `QTextBrowser` in use (low-risk MVP fallback).**
+
+Planned upgrade:
 
 ```text
 QWebEngineView for rendered HTML reader
+```
+
+```text
 markdown-it-py or mistune for Markdown -> HTML
 custom CSS themes
 ```

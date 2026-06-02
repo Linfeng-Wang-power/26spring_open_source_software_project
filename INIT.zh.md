@@ -1,5 +1,20 @@
 # Mercury PyQt Edition - INIT 中文版
 
+## 0. 实现进度（截至 2026-06-02）
+
+| 模块 | 负责人 | 状态 | 交付物 |
+|---|---|---|---|
+| GUI 外壳 | 卢雨凝 | ✅ 完成 | `mercury_gui.py` — PySide6 三栏布局、Protocol 接口、工具栏 |
+| Feed / OPML | 汪琳丰 | ✅ 完成 | `mercury_feed.py` — RSS/Atom 解析、OPML 导入、httpx 同步 |
+| Reader Pipeline | 周珠晗 | ✅ 完成 | `reader/` — fetcher、readability、sanitizer、markdown_converter、html_renderer、tests |
+| 本地存储 | 陈亦楠 | ✅ 完成 | `mercury_storage.py`、`migrations/0001–0005` — SQLite + yoyo、9 张表、33 个测试 |
+| Summary Agent | 陆骏凯 | 🔲 进行中（6.5–6.12） | `summary_results` 表已建；executor 待实现 |
+| Translation Agent | 张睿桐 | 🔲 进行中（6.5–6.12） | `translation_segments` + `provider_profiles` 表已建；executor 待实现 |
+| Agent Runtime | 全组 | 🔲 计划中 | `agent_runs` 表已建；QThreadPool 集成待实现 |
+| 集成 / MVP | 全组 | 🔲 计划中（6.12–6.15） | GUI 接入所有真实服务 |
+
+---
+
 ## 1. 项目目标
 
 Mercury PyQt Edition 是一个本地优先、跨平台的 AI RSS 阅读器。
@@ -135,65 +150,71 @@ Python 3.11+ 或 Python 3.12+
 
 ### 4.3 本地存储
 
-推荐技术栈：
+**实际决策（✅ 已实现）：**
+
+```text
+sqlite3（Python 标准库）+ yoyo-migrations 8.x
+```
+
+后续阶段的推荐技术栈：
 
 ```text
 SQLite + SQLAlchemy 2.x
 ```
 
-MVP 简化方案：
+MVP 选型原因：
 
-```text
-Python 标准库 sqlite3
-```
+1. `sqlite3` 是标准库，零额外 ORM 依赖。
+2. `yoyo-migrations` 用纯 SQL 文件管理 schema 版本，支持依赖排序，无需 SQLAlchemy model。
+3. SQLAlchemy 可在 6.12 后视查询复杂度决定是否引入。
+4. 迁移策略：MVP 用 Yoyo → 后续有需要再升级到 Alembic + SQLAlchemy。
 
-原因：
+已实现的 schema（5 个迁移文件，9 张业务表）：
 
-1. SQLite 是单文件本地数据库，符合本地优先约束。
-2. 不需要数据库服务器，Windows / Linux / macOS 都可用。
-3. SQLAlchemy 提供模型、查询组合、迁移和更清晰的测试边界。
-4. Mercury 需要结构化持久化，不适合只用 JSON 文件。
+| 迁移文件 | 创建的表 |
+|---|---|
+| 0001 | `feeds`、`entries` |
+| 0002 | `contents`（与 `ReaderDocument` 字段一一对应）、`tags` |
+| 0003 | `summary_results`、`translation_segments`（为 AI 组预埋） |
+| 0004 | `provider_profiles`、`agent_runs`（为 AI 组预埋） |
+| 0005 | `settings`（key-value UI 偏好，默认值 `ui.language=zh-CN`） |
 
-需要保存的数据：
+`mercury_storage.py` 中的 Store 类：
 
-1. Feed 订阅源。
-2. Feed entry。
-3. 原始 source HTML。
-4. cleaned HTML。
-5. canonical Markdown。
-6. rendered HTML cache 元数据。
-7. Summary 结果。
-8. Translation segments。
-9. Provider / model 配置元数据。
-10. LLM usage events。
-11. UI 偏好设置。
+- `FeedStore` — upsert、list、按 URL / title 查找、delete（级联）
+- `EntryStore` — upsert、带过滤器 list（feed / 未读 / 星标）、标记已读 / 星标、未读计数、tags
+- `ContentStore` — save/get/has `ReaderDocument`；供 `reader/pipeline.py` 调用
+- `SettingsStore` — key-value get/set、`current_language()`（满足 `mercury_gui.SettingsStore` Protocol）
+- `SummaryStore`、`TranslationStore`、`ProviderStore` — 表已建，实现由陆骏凯 / 张睿桐负责填充
+
+`StorageService` 是 `LocalFeedService` 的直接替换；`mercury_gui.py` 已接入。
 
 风险：
 
 1. SQLite 连接和线程策略必须明确。
 2. 后台 worker 不应该和 GUI 共享不安全的 session 对象。
-3. schema migration 必须从一开始就有版本号。
-4. 大量文章正文可能让数据库膨胀，需要缓存失效策略。
+3. 大量文章正文可能让数据库膨胀，需要缓存失效策略。
 
 ### 4.4 Feed 解析和同步
 
-推荐技术栈：
+**实际决策（✅ 已实现）：**
+
+```text
+xml.etree.ElementTree（标准库）+ httpx
+```
+
+计划升级：
 
 ```text
 feedparser + httpx
 ```
 
-OPML：
+当前选型原因：
 
-```text
-xml.etree.ElementTree
-```
-
-原因：
-
-1. `feedparser` 可以处理 RSS 和 Atom 兼容性。
-2. `httpx` 支持 timeout、redirect、headers，并且测试时方便替换 transport。
-3. OPML 本质是 XML，MVP 阶段用 Python 标准 XML 工具足够。
+1. 标准库 XML 解析器无需额外依赖，MVP 阶段足以解析 RSS 和 Atom。
+2. `feedparser` 仍在计划中，格式兼容性更好；可在 `mercury_feed.py` 内部替换，不影响 GUI 接口。
+3. `httpx` 支持 timeout、redirect、headers，同时实现了 HTML 页面自动发现 Feed 链接的逻辑。
+4. OPML 使用 `xml.etree.ElementTree`，已可用。
 
 在 Mercury 中的职责：
 
@@ -215,20 +236,22 @@ xml.etree.ElementTree
 
 ### 4.5 内容抓取和 Reader 管线
 
-推荐技术栈：
+**实际决策（✅ 已实现 — `reader/` 模块，PR #1）：**
 
 ```text
-httpx + readability-lxml + BeautifulSoup4 + markdownify + bleach
+httpx + readability-lxml + BeautifulSoup4 + markdownify + bleach + markdown-it-py
 ```
 
-目标管线：
+已实现的管线：
 
 ```text
 Feed entry / article URL
-  -> source HTML
-  -> cleaned HTML
-  -> canonical Markdown
-  -> reader HTML
+  -> SourceHtmlFetcher（reader/fetcher.py）
+  -> extract_readable_html（reader/readability.py）
+  -> clean_reader_html（reader/sanitizer.py）
+  -> html_to_markdown（reader/markdown_converter.py）
+  -> render_markdown_to_reader_html（reader/html_renderer.py）
+  -> ReaderDocument（reader/models.py）
 ```
 
 原因：
@@ -256,16 +279,12 @@ Feed entry / article URL
 
 ### 4.6 Reader 渲染
 
-推荐技术栈：
+**当前状态：使用 `QTextBrowser`（低风险 MVP 备选方案）。**
+
+计划升级：
 
 ```text
-QWebEngineView + markdown-it-py 或 mistune + custom CSS themes
-```
-
-低风险 MVP 备选：
-
-```text
-QTextBrowser
+QWebEngineView + markdown-it-py + custom CSS themes
 ```
 
 原因：
