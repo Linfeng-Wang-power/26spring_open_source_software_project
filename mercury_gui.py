@@ -41,7 +41,7 @@ except ModuleNotFoundError as exc:
     print("PySide6 未安装。请先运行：pip install PySide6")
     raise SystemExit(1) from exc
 
-from mercury_feed import LocalFeedService
+from mercury_storage import StorageService
 from reader import ReaderPipelineService
 
 
@@ -1210,7 +1210,7 @@ def main() -> int:
     app.setOrganizationName("Mercury Study Group")
 
     window = MercuryMainWindow(
-        feed_service=LocalFeedService(),
+        feed_service=StorageService(),
         reader_pipeline=ReaderPipelineService(),
         summary_agent=MockSummaryAgent(),
         translation_agent=MockTranslationAgent(),
