@@ -12,7 +12,7 @@
 | 6 | 陆骏凯 | Summary Agent | 6.5 - 6.12 | 摘要 Prompt、SummaryAgent、摘要 demo |
 | 7 | 张睿桐 | Translation / Provider | 6.5 - 6.12 | TranslationAgent、LLMProvider、模型中立接口 |
 | 8 | 晏康佳 | 测试 / Review | 全程 | 测试清单、接口检查、bug 记录、风险清单 |
-| 9 | 张妍维 | 文档 / 其他功能 | 全程 | README、阶段总结、AI Coding 协作记录、汇报材料 |
+| 9 | 张洳维 | 测试 / Review | 全程 | （mac端）测试清单、接口检查、bug记录 |
 
 ## 2. 小组划分
 
@@ -22,7 +22,7 @@
 | GUI / 体验 | 卢雨凝 | 5.29 - 6.5 | 完成可运行 GUI 原型 |
 | Feed + 本地存储 | 汪琳丰、陈亦楠 | 5.29 - 6.5 | Feed / OPML / SQLite / StorageService |
 | AI / Reader 功能 | 周珠晗、陆骏凯、张睿桐 | 6.5 - 6.12 | 内容清洗、摘要、翻译、Provider，可并行 |
-| 测试 / 文档 | 晏康佳、张妍维 | 全程 | 测试、Review、风险记录、文档更新 |
+| 测试 / 文档 | 晏康佳、张洳维 | 全程 | 测试、Review、风险记录、文档更新 |
 
 ## 3. 具体功能技术选型表
 
@@ -50,11 +50,11 @@
 | Translation / Provider | 翻译 Prompt | YAML Prompt Template + PyYAML | 翻译策略可调整，避免 prompt 散落在代码里 | `PromptStore.load("translation")` | 张睿桐 |
 | Translation / Provider | 段落级翻译 | Segment extractor + TranslationAgent | 按段落翻译便于双语显示和失败重试 | `TranslationAgent.translate(article)` | 张睿桐 |
 | Translation / Provider | 翻译结果持久化 | SQLite | 保存 segment translation，避免重复翻译 | `TranslationStore.save_segments()` | 张睿桐、陈亦楠 |
-| 测试 / Review | 单元测试 | `pytest` | Python 标准测试生态，适合模块测试 | `tests/` | 晏康佳 张妍维 |
-| 测试 / Review | GUI 测试 | `pytest-qt` | 可测试 Qt 窗口、按钮、信号 | `test_gui_smoke.py` | 晏康佳 张妍维|
-| 测试 / Review | HTTP mock | `httpx.MockTransport` 或 `respx` | 测试不依赖真实网络 | `test_feed_sync.py` | 晏康佳 张妍维 |
-| 文档 / 其他 | 项目文档 | Markdown | 与 AI Coding Case Study 对齐，便于持续更新 | `README.md`、`PLAN.md` | 晏康佳 张妍维 |
-| 文档 / 其他 | AI 协作记录 | Markdown + 截图 | 记录 AI 生成、人工判断、Review 和风险 | 阶段总结、汇报材料 | 晏康佳 张妍维 |
+| 测试 / Review | 单元测试 | `pytest` | Python 标准测试生态，适合模块测试 | `tests/` | 晏康佳 张洳维 |
+| 测试 / Review | GUI 测试 | `pytest-qt` | 可测试 Qt 窗口、按钮、信号 | `test_gui_smoke.py` | 晏康佳 张洳维|
+| 测试 / Review | HTTP mock | `httpx.MockTransport` 或 `respx` | 测试不依赖真实网络 | `test_feed_sync.py` | 晏康佳 张洳维 |
+| 文档 / 其他 | 项目文档 | Markdown | 与 AI Coding Case Study 对齐，便于持续更新 | `README.md`、`PLAN.md` | 晏康佳 张洳维 |
+| 文档 / 其他 | AI 协作记录 | Markdown + 截图 | 记录 AI 生成、人工判断、Review 和风险 | 阶段总结、汇报材料 | 晏康佳 张洳维 |
 
 ## 4. 时间计划
 
@@ -67,7 +67,7 @@
 | 6.5 - 6.12 | Summary Agent | 陆骏凯 | 摘要 prompt、mock provider、摘要输出 | Summary demo |
 | 6.5 - 6.12 | Translation / Provider | 张睿桐 | LLMProvider、翻译 Agent、分段翻译 | Translation demo |
 | 6.12 - 6.15 | 集成 | 全组 | GUI 接入真实服务 | MVP demo |
-| 全程 | 测试 / 文档 | 晏康佳、张妍维 | 测试清单、接口检查、AI 协作记录 | 风险清单、汇报材料 |
+| 全程 | 测试 / 文档 | 晏康佳、张洳维 | 测试清单、接口检查、AI 协作记录 | 风险清单、汇报材料 |
 
 ## 5. 计划说明
 
