@@ -1,48 +1,62 @@
 #!/usr/bin/env bash
 # build_dmg.sh — Package Mercury into a macOS DMG
 #
+# 构建流程：
+#   1. 创建独立 venv（隔离系统 Python，避免 conda 环境干扰）
+#   2. 安装所有依赖 + PyInstaller
+#   3. PyInstaller 打包成 Mercury.app
+#   4. hdiutil 压缩成 Mercury.dmg
+#
 # Usage:
 #   chmod +x build_dmg.sh
 #   ./build_dmg.sh
 #
-# Requirements (installed automatically if missing):
-#   pip install pyinstaller
-#
-# Output:
-#   dist/Mercury.dmg
+# Output: dist/Mercury.dmg
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 APP_NAME="Mercury"
 ENTRY="mercury_gui.py"
 DMG_OUT="dist/${APP_NAME}.dmg"
-VOLUME_NAME="${APP_NAME}"
-BUILD_DIR="build"
-DIST_DIR="dist"
 STAGING_DIR="dist/dmg_staging"
+VENV_DIR=".venv_build"
 
 # ---------------------------------------------------------------------------
-# 0. Ensure PyInstaller is available
+# 0. 用系统 python3 创建隔离 venv（跳过 conda）
 # ---------------------------------------------------------------------------
-if ! python -m PyInstaller --version &>/dev/null; then
-    echo "→ Installing PyInstaller…"
-    pip install pyinstaller --quiet
+SYSTEM_PYTHON=$(command -v python3.11 || command -v python3.12 || command -v python3.13 || command -v python3)
+
+echo "→ 使用 Python：${SYSTEM_PYTHON} ($(${SYSTEM_PYTHON} --version))"
+echo "→ 创建构建用 venv：${VENV_DIR}"
+
+if [ ! -d "${VENV_DIR}" ]; then
+    "${SYSTEM_PYTHON}" -m venv "${VENV_DIR}"
 fi
 
-# ---------------------------------------------------------------------------
-# 1. Clean previous build artifacts
-# ---------------------------------------------------------------------------
-echo "→ Cleaning previous build…"
-rm -rf "${BUILD_DIR}" "${DIST_DIR}" "${APP_NAME}.spec"
+VENV_PY="${VENV_DIR}/bin/python"
+VENV_PIP="${VENV_DIR}/bin/pip"
 
 # ---------------------------------------------------------------------------
-# 2. PyInstaller: freeze the app into a .app bundle
+# 1. 安装依赖
 # ---------------------------------------------------------------------------
-echo "→ Running PyInstaller…"
-python -m PyInstaller \
+echo "→ 安装 requirements.txt…"
+"${VENV_PIP}" install --quiet --upgrade pip
+"${VENV_PIP}" install --quiet -r requirements.txt
+"${VENV_PIP}" install --quiet pyinstaller
+
+echo "✓ PySide6 路径：$(${VENV_PY} -c 'import PySide6, os; print(os.path.dirname(PySide6.__file__))')"
+
+# ---------------------------------------------------------------------------
+# 2. 清理上次构建
+# ---------------------------------------------------------------------------
+echo "→ 清理上次构建产物…"
+rm -rf build dist "${APP_NAME}.spec"
+
+# ---------------------------------------------------------------------------
+# 3. PyInstaller 打包
+# ---------------------------------------------------------------------------
+echo "→ 运行 PyInstaller…"
+"${VENV_PY}" -m PyInstaller \
     --name "${APP_NAME}" \
     --windowed \
     --noconfirm \
@@ -58,47 +72,47 @@ python -m PyInstaller \
     --collect-all "PySide6" \
     "${ENTRY}"
 
-APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
+APP_BUNDLE="dist/${APP_NAME}.app"
 
 if [ ! -d "${APP_BUNDLE}" ]; then
-    echo "✗ PyInstaller did not produce ${APP_BUNDLE}"
+    echo "✗ PyInstaller 未生成 ${APP_BUNDLE}"
     exit 1
 fi
 
-echo "✓ App bundle: ${APP_BUNDLE}"
+# 快速冒烟测试：直接跑二进制，最多等 5 秒
+echo "→ 冒烟测试（5 秒超时）…"
+BINARY="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+SMOKE=$(timeout 5 "${BINARY}" 2>&1 || true)
+if echo "${SMOKE}" | grep -q "未安装\|ModuleNotFoundError\|ImportError"; then
+    echo "✗ 启动失败，错误输出："
+    echo "${SMOKE}"
+    exit 1
+fi
+echo "✓ App bundle 启动正常"
 
 # ---------------------------------------------------------------------------
-# 3. Prepare DMG staging folder
+# 4. 制作 DMG
 # ---------------------------------------------------------------------------
-echo "→ Preparing DMG staging area…"
+echo "→ 打包 DMG…"
 rm -rf "${STAGING_DIR}"
 mkdir -p "${STAGING_DIR}"
-
-# Copy .app into staging
 cp -R "${APP_BUNDLE}" "${STAGING_DIR}/"
-
-# Create an Applications symlink so users can drag-and-drop to install
 ln -s /Applications "${STAGING_DIR}/Applications"
 
-# ---------------------------------------------------------------------------
-# 4. Build DMG with hdiutil (macOS built-in)
-# ---------------------------------------------------------------------------
-echo "→ Building DMG…"
 rm -f "${DMG_OUT}"
-
 hdiutil create \
-    -volname "${VOLUME_NAME}" \
+    -volname "${APP_NAME}" \
     -srcfolder "${STAGING_DIR}" \
     -ov \
     -format UDZO \
     -imagekey zlib-level=9 \
     "${DMG_OUT}"
 
-# ---------------------------------------------------------------------------
-# 5. Clean up staging
-# ---------------------------------------------------------------------------
 rm -rf "${STAGING_DIR}"
 
+# ---------------------------------------------------------------------------
+# 完成
+# ---------------------------------------------------------------------------
 echo ""
-echo "✓ Done: ${DMG_OUT}"
-echo "  Size: $(du -sh "${DMG_OUT}" | cut -f1)"
+echo "✓ 完成：${DMG_OUT}"
+echo "  大小：$(du -sh "${DMG_OUT}" | cut -f1)"
