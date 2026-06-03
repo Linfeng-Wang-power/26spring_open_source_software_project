@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# build_dmg.sh — Package Mercury into a macOS DMG
+# build_dmg.sh — Package Lumen into a macOS DMG
 #
 # 构建流程：
 #   1. 创建独立 venv（隔离 conda 环境干扰）
 #   2. 安装所有依赖 + setuptools + PyInstaller
-#   3. PyInstaller 打包成 Mercury.app
-#   4. hdiutil 压缩成 Mercury.dmg
+#   3. PyInstaller 打包成 Lumen.app
+#   4. hdiutil 压缩成 Lumen.dmg
 #
 # Usage:
 #   chmod +x build_dmg.sh
 #   ./build_dmg.sh
 #
-# Output: dist/Mercury.dmg
+# Output: dist/Lumen.dmg
 
 set -euo pipefail
 
-APP_NAME="Mercury"
+APP_NAME="Lumen"
 ENTRY="mercury_gui.py"
 DMG_OUT="dist/${APP_NAME}.dmg"
 STAGING_DIR="dist/dmg_staging"
@@ -34,6 +34,24 @@ fi
 
 VENV_PY="${VENV_DIR}/bin/python"
 VENV_PIP="${VENV_DIR}/bin/pip"
+BUILD_TOOLS_DIR=".build_tools"
+
+mkdir -p "${BUILD_TOOLS_DIR}"
+if command -v arm64-apple-darwin20.0.0-lipo >/dev/null 2>&1; then
+    cat > "${BUILD_TOOLS_DIR}/lipo" <<'EOF'
+#!/usr/bin/env bash
+exec arm64-apple-darwin20.0.0-lipo "$@"
+EOF
+    chmod +x "${BUILD_TOOLS_DIR}/lipo"
+fi
+if command -v arm64-apple-darwin20.0.0-install_name_tool >/dev/null 2>&1; then
+    cat > "${BUILD_TOOLS_DIR}/install_name_tool" <<'EOF'
+#!/usr/bin/env bash
+exec arm64-apple-darwin20.0.0-install_name_tool "$@"
+EOF
+    chmod +x "${BUILD_TOOLS_DIR}/install_name_tool"
+fi
+export PATH="${PWD}/${BUILD_TOOLS_DIR}:${PATH}"
 
 # ---------------------------------------------------------------------------
 # 1. 安装依赖
@@ -47,7 +65,7 @@ echo "→ 安装依赖…"
 "${VENV_PIP}" install --quiet pyinstaller
 
 echo "✓ PySide6：$(${VENV_PY} -c 'import PySide6; print(PySide6.__version__)')"
-echo "✓ pkg_resources：$(${VENV_PY} -c 'import pkg_resources; print(pkg_resources.__version__)')"
+echo "✓ pkg_resources：$(${VENV_PY} -c 'import pkg_resources; print(1)')"
 
 # ---------------------------------------------------------------------------
 # 2. 清理上次构建
@@ -67,14 +85,12 @@ echo "→ 运行 PyInstaller…"
     --add-data "migrations:migrations" \
     --add-data "reader:reader" \
     --collect-all "setuptools" \
-    --collect-all "PySide6" \
     --collect-all "yoyo" \
     --collect-all "importlib_metadata" \
     --copy-metadata "yoyo-migrations" \
     --hidden-import "yoyo" \
     --hidden-import "yoyo.backends" \
     --hidden-import "yoyo.backends.base" \
-    --hidden-import "yoyo.backends.sqlite" \
     --hidden-import "yoyo.internalmigrations" \
     --hidden-import "readability" \
     --hidden-import "bs4" \
@@ -92,7 +108,21 @@ fi
 #    --windowed 模式下输出不走终端，用非 windowed 的同名二进制测试
 # ---------------------------------------------------------------------------
 echo "→ 冒烟测试…"
-SMOKE=$(timeout 8 "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" 2>&1 || true)
+SMOKE=$("${VENV_PY}" -c '
+import subprocess
+import sys
+try:
+    proc = subprocess.Popen([sys.argv[1]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        out, _ = proc.communicate(timeout=8)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        out, _ = proc.communicate(timeout=3)
+        out = out or ""
+    print(out, end="")
+except Exception as exc:
+    print(exc)
+' "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" || true)
 if echo "${SMOKE}" | grep -qiE "ModuleNotFoundError|ImportError|No module named|未安装"; then
     echo "✗ 启动失败："
     echo "${SMOKE}"

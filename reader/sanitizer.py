@@ -61,11 +61,24 @@ def repair_relative_urls(html: str, base_url: str) -> str:
     """Resolve relative link and image URLs against the article base URL."""
 
     soup = BeautifulSoup(html, "html.parser")
-    for tag_name, attribute in (("a", "href"), ("img", "src")):
-        for tag in soup.find_all(tag_name):
-            value = tag.get(attribute)
-            if value:
-                tag[attribute] = urljoin(base_url, value)
+    for tag in soup.find_all("img"):
+        image_url = _best_image_url(tag)
+        if image_url:
+            tag["src"] = urljoin(base_url, image_url)
+        for lazy_attr in (
+            "data-src",
+            "data-original",
+            "data-lazy-src",
+            "data-url",
+            "srcset",
+            "data-srcset",
+        ):
+            tag.attrs.pop(lazy_attr, None)
+
+    for tag in soup.find_all("a"):
+        value = tag.get("href")
+        if value:
+            tag["href"] = urljoin(base_url, value)
     return str(soup)
 
 
@@ -93,3 +106,25 @@ def _external_link_callback(attrs: dict, new: bool = False) -> dict:
     if href_key in attrs:
         attrs[(None, "rel")] = "noopener noreferrer"
     return attrs
+
+
+def _best_image_url(tag: object) -> str:
+    for attr in ("src", "data-src", "data-original", "data-lazy-src", "data-url"):
+        value = tag.get(attr) if hasattr(tag, "get") else None
+        if value:
+            return str(value).strip()
+
+    for attr in ("srcset", "data-srcset"):
+        value = tag.get(attr) if hasattr(tag, "get") else None
+        candidate = _first_srcset_url(str(value)) if value else ""
+        if candidate:
+            return candidate
+    return ""
+
+
+def _first_srcset_url(srcset: str) -> str:
+    for item in srcset.split(","):
+        parts = item.strip().split()
+        if parts:
+            return parts[0]
+    return ""

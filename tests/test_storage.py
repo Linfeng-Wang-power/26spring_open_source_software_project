@@ -76,6 +76,7 @@ def _make_article(
     *,
     url: str = "https://example.com/article-1",
     title: str = "Test Article",
+    stable_id: str = "",
     starred: bool = False,
     unread: bool = True,
     tags: tuple[str, ...] = ("Python",),
@@ -88,6 +89,7 @@ def _make_article(
         url=url,
         summary="A test summary.",
         markdown="A test markdown body.",
+        stable_id=stable_id,
         tags=tags,
         starred=starred,
         unread=unread,
@@ -205,6 +207,28 @@ def test_entry_store_upsert_same_url_updates_title(entries, feed_id):
     assert id1 == id2
     rows = entries.list(feed_id=feed_id)
     assert rows[0].title == "New Title"
+
+
+def test_entry_store_upsert_prefers_stable_id(entries, feed_id):
+    first = _make_article(
+        url="https://example.com/old-url",
+        title="Old URL",
+        stable_id="entry-guid-1",
+    )
+    moved = _make_article(
+        url="https://example.com/new-url",
+        title="New URL",
+        stable_id="entry-guid-1",
+    )
+
+    id1 = entries.upsert(feed_id, first)
+    id2 = entries.upsert(feed_id, moved)
+
+    rows = entries.list(feed_id=feed_id)
+    assert id1 == id2
+    assert len(rows) == 1
+    assert rows[0].url == "https://example.com/new-url"
+    assert rows[0].stable_id == "entry-guid-1"
 
 
 def test_entry_store_list_all(entries, feed_id):
@@ -380,6 +404,76 @@ def test_storage_service_settings_store_exposed(svc):
 def test_storage_service_content_store_exposed(svc):
     store = svc.content_store
     assert store is not None
+
+
+def test_storage_service_returns_entry_id_and_saves_reader_document(svc):
+    feed_id = svc._feeds.upsert("Saved Feed", "https://saved.test/rss")
+    entry_id = svc._entries.upsert(
+        feed_id,
+        _make_article(url="https://saved.test/article", stable_id="saved-1"),
+    )
+    article = svc.list_articles("Saved Feed")[0]
+    doc = _make_reader_doc(url=article.url)
+
+    svc.save_reader_document(article.entry_id, doc)
+    cached = svc.get_reader_document(entry_id)
+
+    assert article.entry_id == entry_id
+    assert article.stable_id == "saved-1"
+    assert cached is not None
+    assert cached.canonical_markdown == "hello"
+
+
+def test_storage_service_delete_feed_removes_entries(svc):
+    feed_id = svc._feeds.upsert("Delete Me", "https://delete.test/rss")
+    svc._entries.upsert(feed_id, _make_article(url="https://delete.test/1"))
+
+    svc.delete_feed("Delete Me")
+
+    assert "Delete Me" not in [feed.title for feed in svc.list_feeds()]
+    assert svc.list_articles("Delete Me") == []
+
+
+def test_storage_service_starred_and_read_state_updates(svc):
+    feed_id = svc._feeds.upsert("State Feed", "https://state.test/rss")
+    entry_id = svc._entries.upsert(
+        feed_id,
+        _make_article(url="https://state.test/1", starred=False, unread=True),
+    )
+
+    svc.set_article_starred(entry_id, True)
+    svc.set_article_unread(entry_id, False)
+    article = svc.list_articles("State Feed")[0]
+
+    assert article.starred is True
+    assert article.unread is False
+    assert svc.list_articles("State Feed", unread_only=True) == []
+
+    svc.set_article_unread(entry_id, True)
+    assert len(svc.list_articles("State Feed", unread_only=True)) == 1
+
+
+def test_storage_service_tag_operations(svc):
+    feed_id = svc._feeds.upsert("Tag Feed", "https://tag.test/rss")
+    entry_id = svc._entries.upsert(
+        feed_id,
+        _make_article(url="https://tag.test/1", tags=()),
+    )
+
+    svc.add_article_tag(entry_id, "稍后读")
+    tagged = svc.list_articles_by_tag("稍后读")
+    assert len(tagged) == 1
+    assert tagged[0].entry_id == entry_id
+    assert ("稍后读", 1) in svc.list_tags()
+
+    svc.mark_tag_read("稍后读")
+    assert svc.list_articles_by_tag("稍后读")[0].unread is False
+
+    svc.star_tag_articles("稍后读", True)
+    assert svc.list_articles_by_tag("稍后读")[0].starred is True
+
+    svc.remove_article_tag(entry_id, "稍后读")
+    assert svc.list_articles_by_tag("稍后读") == []
 
 
 def test_no_qt_import():

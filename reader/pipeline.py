@@ -63,10 +63,11 @@ class ReaderPipelineService:
             markdown,
             title=getattr(article, "title", "Untitled"),
             source_url=getattr(article, "url", ""),
+            polished=False,
         )
 
     def clean_current_article(self, article: Any) -> str:
-        """Return a user-visible summary until persistence is connected."""
+        """Clean the current article and return a user-visible summary."""
 
         source_html = getattr(article, "source_html", "")
         if source_html:
@@ -80,7 +81,13 @@ class ReaderPipelineService:
                 f"canonical_markdown：{len(document.canonical_markdown)} 字符"
             )
 
+        url = getattr(article, "url", "")
+        if not url:
+            return f"当前文章没有可抓取的 URL：{getattr(article, 'title', 'Untitled')}"
+
+        document = self.fetch_and_process(url)
         return (
-            f"当前文章暂无 source_html，已使用 Markdown 渲染：{getattr(article, 'title', 'Untitled')}\n\n"
-            "后续接入 ContentStore 后会持久化 source_html、cleaned_html 和 canonical_markdown。"
+            f"已清洗：{document.title}\n\n"
+            f"cleaned_html：{len(document.cleaned_html)} 字符\n"
+            f"canonical_markdown：{len(document.canonical_markdown)} 字符"
         )

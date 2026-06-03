@@ -45,6 +45,8 @@ class Article:
     url: str
     summary: str
     markdown: str
+    stable_id: str = ""
+    entry_id: str = ""
     tags: tuple[str, ...] = ()
     starred: bool = False
     unread: bool = True
@@ -87,12 +89,16 @@ class LocalFeedService:
             feeds.append(Feed(subscription.title, subscription.url, count))
         return feeds
 
-    def list_articles(self, feed_title: str | None = None) -> list[Article]:
+    def list_articles(self, feed_title: str | None = None, unread_only: bool = False) -> list[Article]:
         if feed_title in (None, "All Feeds"):
-            return list(self.articles)
-        if feed_title == "Starred":
-            return [article for article in self.articles if article.starred]
-        return self._articles_for_feed(feed_title)
+            articles = list(self.articles)
+        elif feed_title == "Starred":
+            articles = [article for article in self.articles if article.starred]
+        else:
+            articles = self._articles_for_feed(feed_title)
+        if unread_only:
+            articles = [article for article in articles if article.unread]
+        return articles
 
     def add_feed(self, url: str) -> None:
         normalized_url = self._validate_feed_url(url)
@@ -110,6 +116,19 @@ class LocalFeedService:
             if not any(feed.url == subscription.url for feed in self.subscriptions):
                 self.subscriptions.append(subscription)
         self._save_cache()
+
+    def delete_feed(self, feed_title: str) -> None:
+        if feed_title in {"All Feeds", "Starred"}:
+            raise ValueError("内置视图不能删除。")
+        self.subscriptions = [feed for feed in self.subscriptions if feed.title != feed_title]
+        self.articles = [article for article in self.articles if article.feed_title != feed_title]
+        self._save_cache()
+
+    def set_article_starred(self, entry_id: str, starred: bool) -> None:
+        self._update_article_flag(entry_id, starred=starred)
+
+    def set_article_unread(self, entry_id: str, unread: bool) -> None:
+        self._update_article_flag(entry_id, unread=unread)
 
     def refresh_all(self) -> None:
         self.last_error = None
@@ -169,6 +188,38 @@ class LocalFeedService:
     def _articles_for_feed(self, feed_title: str) -> list[Article]:
         return [article for article in self.articles if article.feed_title == feed_title]
 
+    def _update_article_flag(
+        self,
+        entry_id: str,
+        *,
+        starred: bool | None = None,
+        unread: bool | None = None,
+    ) -> None:
+        updated: list[Article] = []
+        for article in self.articles:
+            matches = article.entry_id == entry_id if entry_id else False
+            if not matches:
+                updated.append(article)
+                continue
+            updated.append(
+                Article(
+                    title=article.title,
+                    feed_title=article.feed_title,
+                    author=article.author,
+                    published=article.published,
+                    url=article.url,
+                    summary=article.summary,
+                    markdown=article.markdown,
+                    stable_id=article.stable_id,
+                    entry_id=article.entry_id,
+                    tags=article.tags,
+                    starred=article.starred if starred is None else starred,
+                    unread=article.unread if unread is None else unread,
+                )
+            )
+        self.articles = updated
+        self._save_cache()
+
     @staticmethod
     def _unread_count(articles: Iterable[Article]) -> int:
         return len([article for article in articles if article.unread])
@@ -204,12 +255,20 @@ def parse_opml(xml_text: str) -> list[FeedSubscription]:
     """Parse OPML subscriptions using Python's standard XML library."""
     root = ET.fromstring(_clean_xml_text(xml_text))
     feeds: list[FeedSubscription] = []
+    seen_urls: set[str] = set()
     for outline in root.findall(".//outline"):
         url = outline.attrib.get("xmlUrl") or outline.attrib.get("xmlurl")
         if not url:
             continue
+        url = url.strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
         title = outline.attrib.get("title") or outline.attrib.get("text") or url
-        feeds.append(FeedSubscription(title=title.strip(), url=url.strip()))
+        feeds.append(FeedSubscription(title=title.strip(), url=url))
     return feeds
 
 
@@ -305,10 +364,11 @@ def _parse_rss(root: ET.Element, source_url: str) -> tuple[str, list[Article]]:
     articles = []
     for item in channel.findall("item"):
         title = _text(item, "title") or "Untitled"
-        link = _text(item, "link") or source_url
+        link = urljoin(source_url, _text(item, "link")) if _text(item, "link") else source_url
         summary = _text(item, "description")
         published = _format_date(_text(item, "pubDate"))
         author = _text(item, "author") or _text(item, "creator") or feed_title
+        stable_id = _text(item, "guid") or link
         markdown = html.unescape(_strip_html(summary or title))
         articles.append(
             Article(
@@ -319,6 +379,7 @@ def _parse_rss(root: ET.Element, source_url: str) -> tuple[str, list[Article]]:
                 url=link.strip(),
                 summary=html.unescape(_strip_html(summary)) if summary else "",
                 markdown=markdown,
+                stable_id=stable_id.strip(),
                 tags=("RSS",),
             )
         )
@@ -330,10 +391,11 @@ def _parse_atom(root: ET.Element, source_url: str) -> tuple[str, list[Article]]:
     articles = []
     for entry in _children(root, "entry"):
         title = _child_text(entry, "title") or "Untitled"
-        link = _atom_link(entry) or source_url
+        link = urljoin(source_url, _atom_link(entry)) if _atom_link(entry) else source_url
         summary = _child_text(entry, "summary") or _child_text(entry, "content")
         published = _format_date(_child_text(entry, "published") or _child_text(entry, "updated"))
         author = _atom_author(entry) or feed_title
+        stable_id = _child_text(entry, "id") or link
         markdown = html.unescape(_strip_html(summary or title))
         articles.append(
             Article(
@@ -344,6 +406,7 @@ def _parse_atom(root: ET.Element, source_url: str) -> tuple[str, list[Article]]:
                 url=link.strip(),
                 summary=html.unescape(_strip_html(summary)) if summary else "",
                 markdown=markdown,
+                stable_id=stable_id.strip(),
                 tags=("Atom",),
             )
         )

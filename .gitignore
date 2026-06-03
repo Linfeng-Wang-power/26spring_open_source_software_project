@@ -6,5 +6,11 @@ __pycache__/
 # PyInstaller build artifacts
 build/
 dist/
+!dist/
+dist/*
+!dist/运行说明.md
 *.spec
 .venv_build/
+.build_tools/
+*.dmg
+*.app/
