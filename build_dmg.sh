@@ -50,7 +50,7 @@ echo "✓ PySide6 路径：$(${VENV_PY} -c 'import PySide6, os; print(os.path.di
 # 2. 清理上次构建
 # ---------------------------------------------------------------------------
 echo "→ 清理上次构建产物…"
-rm -rf build dist "${APP_NAME}.spec"
+rm -rf build dist "${APP_NAME}.spec" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # 3. PyInstaller 打包
@@ -63,6 +63,7 @@ echo "→ 运行 PyInstaller…"
     --clean \
     --add-data "migrations:migrations" \
     --add-data "reader:reader" \
+    --hidden-import "pkg_resources" \
     --hidden-import "yoyo" \
     --hidden-import "yoyo.backends" \
     --hidden-import "yoyo.backends.base" \
