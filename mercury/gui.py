@@ -821,6 +821,7 @@ class ArticleListItem(QWidget):
     def __init__(self, article: Article, on_star_clicked: object | None = None) -> None:
         super().__init__()
         self.article = article
+        self._on_star_clicked = on_star_clicked
 
         root = QHBoxLayout(self)
         root.setContentsMargins(12, 8, 10, 8)
@@ -829,30 +830,47 @@ class ArticleListItem(QWidget):
         text_box = QVBoxLayout()
         text_box.setSpacing(2)
 
-        title = QLabel(article.title)
-        title.setObjectName("ArticleItemTitle")
-        title.setWordWrap(True)
-        title_font = title.font()
-        title_font.setBold(article.unread)
-        title.setFont(title_font)
+        self._title_label = QLabel(article.title)
+        self._title_label.setObjectName("ArticleItemTitle")
+        self._title_label.setWordWrap(True)
+        self._meta_label = QLabel("")
+        self._meta_label.setObjectName("ArticleItemMeta")
 
-        read_state = "未读" if article.unread else "已读"
-        meta = QLabel(f"{article.feed_title} · {read_state}\n{article.published}")
-        meta.setObjectName("ArticleItemMeta")
+        text_box.addWidget(self._title_label)
+        text_box.addWidget(self._meta_label)
 
-        text_box.addWidget(title)
-        text_box.addWidget(meta)
-
-        star = QPushButton("★" if article.starred else "☆")
-        star.setObjectName("StarButton")
-        star.setToolTip("收藏" if not article.starred else "取消收藏")
-        star.setFixedWidth(30)
-        star.setCursor(Qt.PointingHandCursor)
+        self._star_button = QPushButton("")
+        self._star_button.setObjectName("StarButton")
+        self._star_button.setFixedWidth(30)
+        self._star_button.setCursor(Qt.PointingHandCursor)
         if on_star_clicked is not None:
-            star.clicked.connect(lambda _checked=False, item=article: on_star_clicked(item))
+            self._star_button.clicked.connect(self._handle_star_clicked)
 
         root.addLayout(text_box, 1)
-        root.addWidget(star)
+        root.addWidget(self._star_button)
+
+        self.apply_article(article)
+
+    def apply_article(self, article: Article) -> None:
+        """Sync the row's labels / star state to *article* in place.
+
+        Used after auto-mark-read so the row visually flips to 已读 without
+        having to call setItemWidget — replacing the widget would invalidate
+        any QListWidget multi-selection the user has just built up.
+        """
+        self.article = article
+        self._title_label.setText(article.title)
+        title_font = self._title_label.font()
+        title_font.setBold(article.unread)
+        self._title_label.setFont(title_font)
+        read_state = "未读" if article.unread else "已读"
+        self._meta_label.setText(f"{article.feed_title} · {read_state}\n{article.published}")
+        self._star_button.setText("★" if article.starred else "☆")
+        self._star_button.setToolTip("收藏" if not article.starred else "取消收藏")
+
+    def _handle_star_clicked(self) -> None:
+        if self._on_star_clicked is not None:
+            self._on_star_clicked(self.article)
 
 
 class MercuryMainWindow(QMainWindow):
@@ -1615,10 +1633,13 @@ class MercuryMainWindow(QMainWindow):
                 article = replace(article, unread=False)
                 current_item = self.article_list.currentItem()
                 if current_item is not None:
-                    # Update the item's stored Article in place. Replacing the
-                    # item widget here would clobber any multi-selection the
-                    # user has built up via Shift / Ctrl click.
+                    # Update the stored DTO and refresh the row's labels in
+                    # place. Replacing the widget via setItemWidget would clear
+                    # any QListWidget multi-selection the user has built up.
                     current_item.setData(Qt.UserRole, article)
+                    widget = self.article_list.itemWidget(current_item)
+                    if isinstance(widget, ArticleListItem):
+                        widget.apply_article(article)
                 self._load_feeds()
             except Exception as exc:
                 self._show_error_dialog("更新已读状态失败", str(exc))
