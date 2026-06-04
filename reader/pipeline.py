@@ -10,7 +10,7 @@ import httpx
 from reader.fetcher import SourceHtmlFetcher
 from reader.html_renderer import render_markdown_to_reader_html
 from reader.markdown_converter import html_to_markdown
-from reader.models import FetchResult, ReaderDocument
+from reader.models import ReaderDocument
 from reader.readability import extract_readable_html
 from reader.sanitizer import clean_reader_html
 
@@ -63,10 +63,11 @@ class ReaderPipelineService:
             markdown,
             title=getattr(article, "title", "Untitled"),
             source_url=getattr(article, "url", ""),
+            polished=False,
         )
 
     def clean_current_article(self, article: Any) -> str:
-        """Return a user-visible summary until persistence is connected."""
+        """Clean the current article and return a user-visible summary."""
 
         source_html = getattr(article, "source_html", "")
         if source_html:
@@ -74,13 +75,20 @@ class ReaderPipelineService:
                 source_html,
                 source_url=getattr(article, "url", ""),
             )
-            return (
-                f"已清洗：{document.title}\n\n"
-                f"cleaned_html：{len(document.cleaned_html)} 字符\n"
-                f"canonical_markdown：{len(document.canonical_markdown)} 字符"
-            )
+            return _format_clean_summary(document)
 
-        return (
-            f"当前文章暂无 source_html，已使用 Markdown 渲染：{getattr(article, 'title', 'Untitled')}\n\n"
-            "后续接入 ContentStore 后会持久化 source_html、cleaned_html 和 canonical_markdown。"
-        )
+        url = getattr(article, "url", "")
+        if not url:
+            title = getattr(article, "title", "Untitled")
+            return f"当前文章没有可抓取的 URL：{title}"
+
+        document = self.fetch_and_process(url)
+        return _format_clean_summary(document)
+
+
+def _format_clean_summary(document: ReaderDocument) -> str:
+    return (
+        f"已清洗：{document.title}\n\n"
+        f"cleaned_html：{len(document.cleaned_html)} 字符\n"
+        f"canonical_markdown：{len(document.canonical_markdown)} 字符"
+    )

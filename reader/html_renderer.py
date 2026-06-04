@@ -73,7 +73,7 @@ def render_markdown_to_reader_html(
 
     markdown_renderer = MarkdownIt("commonmark", {"html": False}).enable("table")
     body_html = sanitize_html(markdown_renderer.render(markdown))
-    metadata = f"<div class=\"meta\">{escape(source_url)}</div>" if source_url else ""
+    metadata = _render_source_link(source_url)
 
     return f"""<!doctype html>
 <html>
@@ -88,3 +88,16 @@ def render_markdown_to_reader_html(
   </body>
 </html>
 """
+
+
+def _render_source_link(source_url: str) -> str:
+    if not source_url:
+        return ""
+
+    safe_url = escape(source_url, quote=True)
+    return (
+        '<div class="meta">'
+        f'<a href="{safe_url}" rel="noopener noreferrer">查看原文</a>'
+        f"<br>{escape(source_url)}"
+        "</div>"
+    )
