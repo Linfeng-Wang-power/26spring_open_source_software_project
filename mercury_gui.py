@@ -1072,7 +1072,7 @@ class MercuryMainWindow(QMainWindow):
         self.summary_toggle.clicked.connect(self.on_summary_panel_toggle)
         layout.addWidget(self.summary_toggle)
 
-        layout.addWidget(QLabel("Summary"))
+        layout.addWidget(QLabel("摘要"))
         self.summary_text = QLabel("选择文章后可运行摘要。")
         self.summary_text.setObjectName("SummaryText")
         self.summary_text.setWordWrap(False)
