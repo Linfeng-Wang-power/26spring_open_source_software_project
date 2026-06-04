@@ -360,13 +360,13 @@ PY
 
 ## 8. 执行清单
 
-- [ ] 确认使用仓库内 `softvenv`。
-- [ ] 确认 `softvenv` 已安装 `requirements.txt`。
-- [ ] 记录 `softvenv/bin/python --version`、`pip check` 和核心依赖导入结果。
-- [ ] 执行 Feed / Reader / GUI smoke 分组测试。
+- [v ] 确认使用仓库内 `softvenv`。
+- [v ] 确认 `softvenv` 已安装 `requirements.txt`。
+- [v ] 记录 `softvenv/bin/python --version`、`pip check` 和核心依赖导入结果。
+- [v ] 执行 Feed / Reader / GUI smoke 分组测试。
 - [ ] 执行 Storage 功能测试。
 - [ ] 执行 Storage 无 Qt 依赖隔离测试。
-- [ ] 手工启动 `softvenv/bin/python mercury_gui.py` 并截图。
+- [v] 手工启动 `softvenv/bin/python mercury_gui.py` 并截图。
 - [ ] 手工验证 OPML 解析。
 - [ ] 手工验证 Reader Pipeline。
 - [ ] 手工验证默认 `StorageService()` 路径。
