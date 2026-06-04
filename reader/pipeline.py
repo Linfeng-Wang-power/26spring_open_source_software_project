@@ -10,7 +10,7 @@ import httpx
 from reader.fetcher import SourceHtmlFetcher
 from reader.html_renderer import render_markdown_to_reader_html
 from reader.markdown_converter import html_to_markdown
-from reader.models import FetchResult, ReaderDocument
+from reader.models import ReaderDocument
 from reader.readability import extract_readable_html
 from reader.sanitizer import clean_reader_html
 
@@ -75,11 +75,7 @@ class ReaderPipelineService:
                 source_html,
                 source_url=getattr(article, "url", ""),
             )
-            return (
-                f"已清洗：{document.title}\n\n"
-                f"cleaned_html：{len(document.cleaned_html)} 字符\n"
-                f"canonical_markdown：{len(document.canonical_markdown)} 字符"
-            )
+            return _format_clean_summary(document)
 
         url = getattr(article, "url", "")
         if not url:
