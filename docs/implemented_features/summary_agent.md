@@ -87,7 +87,7 @@ GUI 入口：工具栏 *设置*。三项必填：
 
 ```
 pytest -q --ignore=tests/test_gui_smoke.py
-# 86 passed
+# Phase 2 后约 100+ passed
 pytest tests/test_gui_smoke.py
 # 3 passed (pytest-qt)
 ```
@@ -102,17 +102,21 @@ pytest tests/test_gui_smoke.py
 - [x] `SummaryStore` 真实实现（覆盖既有 `NotImplementedError` stub）
 - [x] `SummaryWorker`（QThread，节流流式）
 - [x] GUI 接线：on_summary、文章切换回放、取消、错误展示
-- [x] `SummarySettingsDialog`（base_url / model / api_key / 详细度）
-- [x] 端到端测试 86 + GUI smoke 3 全过
-- [ ] Phase 2：targetLanguage 切换器、超长内容裁剪、provider 测试连接按钮、批量摘要
-- [ ] Phase 2：迁移到 Mercury 仓库目标布局（`mercury/agent/...`）
+- [x] `SummarySettingsDialog`（base_url / model / api_key / 详细度 / 测试连接按钮）
+- [x] 端到端测试 100+ 全过
+- [x] Phase 2：超长内容裁剪（`max_content_chars` 默认 12000，60/40 头尾切片 + 省略提示）
+- [x] Phase 2：targetLanguage 切换器（SummaryBar 下拉，持久化到 `summary.target_lang`）
+- [x] Phase 2：批量摘要（多选 + 串行 worker + 进度对话框 + 失败聚合）
+- [ ] Phase 3：迁移到 Mercury 仓库目标布局（`mercury/agent/...`）— 跨切片重构，建议独立 PR
 
 ## 8. 已知限制
 
-1. 暂不支持文章超长时主动裁剪：超 token 直接由 Provider 报错并显示给用户。
+1. ~~暂不支持文章超长时主动裁剪~~ → 已在 Phase 2 实现，`SummaryRequest.max_content_chars` 默认 12000，
+   超长时 60/40 头尾切片并插入 `[…内容因长度限制已裁剪…]` 提示。`SummaryResult.truncated` 携带标记。
 2. Provider 设置只支持单 profile（无多 Provider 切换）。
-3. 翻译目标语言取自 `SettingsStore.current_language()`，未在摘要面板单独提供选择器（设计阶段确认）。
+3. ~~翻译目标语言取自 `SettingsStore.current_language()`~~ → 已在 SummaryBar 加下拉「跟随界面/中文/英文/日文」，写入 `summary.target_lang`。
 4. 系统 keyring 失败时需手动用环境变量；未提供 GUI fallback。
+5. 批量摘要使用非流式调用；进度对话框关闭即视为取消（剩余 entry 计入 skipped）。
 
 ## 9. 下一步衔接点
 
