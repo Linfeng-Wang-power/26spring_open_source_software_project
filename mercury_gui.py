@@ -565,6 +565,74 @@ class MockSummaryAgent:
         return article.summary
 
 
+class BatchSummaryDialog(QDialog):
+    """Modal progress dialog for batch summary jobs.
+
+    Shows one row per article and updates the leading status icon as the
+    worker reports outcomes. Stays open until the user closes it so the
+    full report (successes + failures) can be reviewed.
+    """
+
+    def __init__(self, titles: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("批量摘要")
+        self.setMinimumSize(520, 380)
+
+        self.progress_label = QLabel("准备开始…")
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.NoSelection)
+        for t in titles:
+            QListWidgetItem(f"⏳  {t}", self.list)
+
+        self.cancel_button = QPushButton("取消")
+        self.close_button = QPushButton("关闭")
+        self.close_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self._on_cancel_clicked)
+        self.close_button.clicked.connect(self.accept)
+
+        bbox = QDialogButtonBox()
+        bbox.addButton(self.cancel_button, QDialogButtonBox.ActionRole)
+        bbox.addButton(self.close_button, QDialogButtonBox.AcceptRole)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.list, 1)
+        layout.addWidget(bbox)
+
+        self._cancel_callback = None
+
+    def set_cancel_callback(self, fn) -> None:
+        self._cancel_callback = fn
+
+    def _on_cancel_clicked(self) -> None:
+        if self._cancel_callback:
+            self._cancel_callback()
+        self.cancel_button.setEnabled(False)
+        self.progress_label.setText("正在取消…")
+
+    def update_progress(self, current: int, total: int, title: str) -> None:
+        self.progress_label.setText(f"({current}/{total}) {title}")
+        idx = current - 1
+        if 0 <= idx < self.list.count():
+            self.list.item(idx).setText(f"⏵  {title}")
+
+    def update_outcome(self, index: int, ok: bool, title: str, detail: str = "") -> None:
+        if not (0 <= index < self.list.count()):
+            return
+        icon = "✓" if ok else "✗"
+        text = f"{icon}  {title}"
+        if detail:
+            text += f"  — {detail}"
+        self.list.item(index).setText(text)
+
+    def mark_finished(self, success: int, fail: int, skipped: int) -> None:
+        self.progress_label.setText(
+            f"完成：成功 {success}，失败 {fail}，跳过 {skipped}"
+        )
+        self.cancel_button.setEnabled(False)
+        self.close_button.setEnabled(True)
+
+
 class SummarySettingsDialog(QDialog):
     """User-facing config for the summary LLM provider.
 
@@ -814,6 +882,8 @@ class MercuryMainWindow(QMainWindow):
         self.summary_buffer = ""
         self.summary_detail_level = "default"
         self.summary_target_lang = ""  # "" means follow UI language
+        self.batch_summary_thread: QThread | None = None
+        self.batch_summary_worker = None
         self.unread_filter_enabled = False
         self.last_refresh_status = "尚未刷新"
         self.sidebar_collapsed = False
@@ -915,6 +985,11 @@ class MercuryMainWindow(QMainWindow):
         self.summary_action = QAction("摘要", self)
         self.summary_action.triggered.connect(self.on_summary)
         toolbar.addAction(self.summary_action)
+
+        self.batch_summary_action = QAction("批量摘要", self)
+        self.batch_summary_action.setToolTip("为列表中所选文章逐个生成摘要")
+        self.batch_summary_action.triggered.connect(self.on_batch_summary)
+        toolbar.addAction(self.batch_summary_action)
 
         self.translation_action = QAction("翻译", self)
         self.translation_action.triggered.connect(self.on_translate)
@@ -1037,6 +1112,7 @@ class MercuryMainWindow(QMainWindow):
 
         self.article_list = QListWidget()
         self.article_list.setObjectName("ArticleList")
+        self.article_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.article_list.currentItemChanged.connect(self.on_article_selected)
         layout.addWidget(self.article_list, 1)
         return panel
@@ -2346,6 +2422,121 @@ class MercuryMainWindow(QMainWindow):
     def _is_current_entry(self, entry_id: str) -> bool:
         current = getattr(self.current_article, "entry_id", "") if self.current_article else ""
         return bool(entry_id) and entry_id == current
+
+    # -- Batch summary -------------------------------------------------------
+
+    def on_batch_summary(self) -> None:
+        articles = self._selected_articles_for_batch()
+        if not articles:
+            self._show_error_dialog(
+                "未选择文章",
+                "请在文章列表中按住 Ctrl 或 Shift 选择多篇文章后再使用批量摘要。",
+            )
+            return
+        if self.batch_summary_thread is not None:
+            self._show_error_dialog(
+                "批量摘要进行中",
+                "请等待当前批量任务完成或取消后再启动新的批量任务。",
+            )
+            return
+
+        agent = self._ensure_summary_agent()
+        if agent is None:
+            return
+
+        store = self._summary_store()
+        target_lang = self._resolve_target_language()
+        items: list = []
+        from agent.summary.batch_worker import BatchSummaryItem
+        from agent.summary.summary_agent import SummaryRequest
+
+        for article in articles:
+            entry_id = getattr(article, "entry_id", "") or ""
+            content = self._summary_input_for(article)
+            request = SummaryRequest(
+                entry_id=entry_id,
+                title=article.title or "",
+                content=content,
+                target_language=target_lang,
+                detail_level=self.summary_detail_level,
+            )
+            items.append(
+                BatchSummaryItem(
+                    entry_id=entry_id,
+                    title=article.title or entry_id,
+                    request=request,
+                )
+            )
+
+        from agent.summary.batch_worker import BatchSummaryWorker
+
+        dialog = BatchSummaryDialog([it.title for it in items], self)
+        thread = QThread(self)
+        worker = BatchSummaryWorker(agent, items)
+        worker.moveToThread(thread)
+        dialog.set_cancel_callback(worker.request_cancel)
+
+        worker.progress.connect(dialog.update_progress)
+
+        # Track outcome index against the dialog list ordering.
+        index_holder = {"i": 0}
+
+        def on_item_done(outcome) -> None:
+            idx = index_holder["i"]
+            index_holder["i"] += 1
+            detail = ""
+            if outcome.skipped:
+                detail = outcome.error or "已跳过"
+            elif not outcome.ok:
+                detail = (outcome.error or "失败")[:120]
+            dialog.update_outcome(idx, outcome.ok, outcome.title, detail)
+            if outcome.ok and store is not None and outcome.entry_id:
+                try:
+                    store.save_result(outcome.entry_id, outcome.text, outcome.model_id)
+                except Exception:
+                    # Persistence failure is non-fatal for the batch run.
+                    pass
+
+        worker.item_done.connect(on_item_done)
+        worker.finished.connect(dialog.mark_finished)
+        worker.cancelled.connect(dialog.mark_finished)
+        worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        thread.finished.connect(self._clear_batch_summary_worker)
+
+        thread.started.connect(worker.run)
+        self.batch_summary_thread = thread
+        self.batch_summary_worker = worker
+        thread.start()
+
+        dialog.exec()
+        # When the dialog is closed mid-run, also cancel.
+        if self.batch_summary_worker is not None:
+            self.batch_summary_worker.request_cancel()
+
+    def _selected_articles_for_batch(self) -> list[Article]:
+        items = self.article_list.selectedItems()
+        articles: list[Article] = []
+        seen = set()
+        for it in items:
+            data = it.data(Qt.UserRole)
+            if not isinstance(data, Article):
+                continue
+            key = data.entry_id or id(data)
+            if key in seen:
+                continue
+            seen.add(key)
+            articles.append(data)
+        # If only one row is selected, fall back to the currently focused article
+        # so users who didn't multi-select still get a useful action.
+        if not articles and self.current_article is not None:
+            articles.append(self.current_article)
+        return articles
+
+    @Slot()
+    def _clear_batch_summary_worker(self) -> None:
+        self.batch_summary_thread = None
+        self.batch_summary_worker = None
 
     def on_translate(self) -> None:
         if not self.current_article:
