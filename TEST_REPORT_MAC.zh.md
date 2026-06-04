@@ -129,6 +129,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 softvenv/bin/python -m pytest tests/test_storag
 | Simon Willison's Weblog | `https://simonwillison.net/atom/everything/` |
 | Daring Fireball | `https://daringfireball.net/feeds/main` |
 | Python Insider | `https://blog.python.org/feeds/posts/default` |
+| cs.SE updates on arXiv.org | `https://rss.arxiv.org/rss/cs.SE` |
+| dblp: new volumes for streams/conf/sigsoft | `https://dblp.dagstuhl.de/feed/streams/conf/sigsoft.rss` |
+| dblp: new issues for streams/journals/tse | `https://dblp.dagstuhl.de/feed/streams/journals/tse.rss` |
 
 抽样文章链接：
 
@@ -138,6 +141,21 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 softvenv/bin/python -m pytest tests/test_storag
 | Microsoft's new MAI models | `https://simonwillison.net/2026/Jun/2/microsofts-new-models/#atom-everything` |
 | Apple, the Anti-‘Metaverse’ VR Company | `https://daringfireball.net/2025/12/meta_says_fuck_that_metaverse_shit` |
 | datasette-agent-micropython 0.1a0 | `https://simonwillison.net/2026/Jun/2/datasette-agent-micropython/#atom-everything` |
+
+科研信息源导入测试：
+
+```text
+arXiv cs.SE https://rss.arxiv.org/rss/cs.SE
+DBLP SIGSOFT https://dblp.dagstuhl.de/feed/streams/conf/sigsoft.rss
+DBLP TSE https://dblp.dagstuhl.de/feed/streams/journals/tse.rss
+```
+
+说明：
+
+1. arXiv cs.SE 可作为软件工程预印本信息源。
+2. DBLP SIGSOFT 和 DBLP TSE 可以成功导入并产生条目。
+3. 但 DBLP feed 的条目内容较空，数据库查询显示 `summary` 长度为 0；GUI 中基本只展示会议/期刊卷期标题和 URL，不适合作为完整摘要阅读源。
+4. DBLP 更适合用于“发现论文条目 / 跳转到目录页”，不适合直接作为 Reader 正文阅读源。
 
 GUI 真实启动命令：
 
@@ -171,7 +189,80 @@ https://daringfireball.net/linked/2026/06/01/
 
 结论：真实订阅数据已导入，GUI 有内容可展示；但真实 GUI 手工验收发现 Reader 内容读取、段落排版、异常符号和链接跳转仍存在问题，需要后续修复。
 
-## 6. 风险和备注
+## 6. 手工验证结果
+
+### 6.1 OPML 解析
+
+测试目的：
+
+验证项目能否从 OPML 文件中解析出多个 RSS / Atom 订阅源，用于批量导入科研信息源。
+
+实际输出：
+
+```text
+arXiv cs.SE https://rss.arxiv.org/rss/cs.SE
+DBLP SIGSOFT https://dblp.dagstuhl.de/feed/streams/conf/sigsoft.rss
+DBLP TSE https://dblp.dagstuhl.de/feed/streams/journals/tse.rss
+```
+
+结论：
+
+OPML 解析通过。程序可以正确读取 OPML 中的订阅源标题和 URL。
+
+### 6.2 Reader Pipeline
+
+测试目的：
+
+验证 Reader Pipeline 在输入 HTML 后，是否能执行基础清洗、链接修复和 Markdown / Reader HTML 生成。
+
+实际输出：
+
+```text
+[no-title]
+True
+True
+True
+```
+
+解释：
+
+1. 第一个输出为 `[no-title]`，说明当前测试输入下标题没有被正确识别。
+2. 第一个 `True` 表示危险脚本内容被清理。
+3. 第二个 `True` 表示相对链接可以被修复为绝对链接。
+4. 第三个 `True` 表示正文内容进入了 canonical Markdown。
+
+结论：
+
+Reader Pipeline 的基础清洗、链接修复和正文转换可用；但标题提取存在问题，本次手工测试未识别出预期标题。
+
+### 6.3 默认 StorageService 路径
+
+测试目的：
+
+验证 GUI 默认使用的本地数据库路径是否正确，以及当前数据库中是否已有可展示订阅和文章。
+
+实际输出：
+
+```text
+import pkg_resources
+DB_PATH: /Users/rrruuu/.mercury_pyqt/mercury.db
+Feeds:
+- All Feeds 680 internal://all
+- Starred 0 internal://starred
+- Simon Willison's Weblog 18 https://simonwillison.net/atom/everything/
+- Daring Fireball 43 https://daringfireball.net/feeds/main
+- Python Insider 48 https://blog.python.org/feeds/posts/default
+- cs.SE updates on arXiv.org 25 https://rss.arxiv.org/rss/cs.SE
+- dblp: new volumes for streams/conf/sigsoft 30 https://dblp.dagstuhl.de/feed/streams/conf/sigsoft.rss
+- dblp: new issues for streams/journals/tse 516 https://dblp.dagstuhl.de/feed/streams/journals/tse.rss
+Article count: 702
+```
+
+结论：
+
+StorageService 默认路径验证通过，数据库路径为 `/Users/rrruuu/.mercury_pyqt/mercury.db`，当前已有 6 个真实订阅源和 702 篇文章。输出中的 `import pkg_resources` 来自 yoyo 依赖 warning，不影响数据库读取。
+
+## 7. 风险和备注
 
 | 优先级 | 问题 | 影响 | 当前处理 |
 |---|---|---|---|
@@ -180,12 +271,14 @@ https://daringfireball.net/linked/2026/06/01/
 | P2 | `yoyo` 使用 deprecated `pkg_resources` | Python 3.14 下有 warning | 当前不影响测试通过；后续可评估升级或替换 migration 方案 |
 | P2 | Python 3.14 下 yoyo / sqlite3 有大量 deprecation warnings | 测试输出 warning 数量较多，影响报告观感 | 如实记录；当前断言均通过，后续可考虑 Python 3.11/3.12 或升级迁移工具 |
 | P2 | 真实订阅依赖外网 | 网络不可用时刷新可能失败 | 本次已成功导入数据到本地 SQLite，GUI 启动可离线查看已导入文章列表 |
+| P2 | DBLP feed 条目缺少摘要正文 | 可导入但 Reader 内容较空，只适合论文目录跳转 | 如实记录；后续若要科研摘要阅读，应优先使用 arXiv 或可提供摘要的 API / RSS |
+| P2 | Reader Pipeline 标题识别为 `[no-title]` | 手工验证中标题提取不完整 | 如实记录；后续需要检查 readability 标题提取逻辑 |
 | P2 | Reader 未正确读取链接中的完整文章 | GUI 展示内容不完整，影响真实阅读体验 | 已在本报告如实记录，后续需要检查清洗按钮、ReaderPipeline 和缓存展示链路 |
 | P2 | Reader 正文未分段且段末有异常符号 | 影响文章可读性和汇报展示效果 | 已在本报告如实记录，后续需要检查 HTML 到 Markdown / Reader HTML 渲染 |
 | P2 | “查看原文”链接不支持跳转 | 用户无法从 Reader 直接打开原文 | 已在本报告如实记录，后续需要检查 QTextBrowser 链接处理或外部浏览器打开逻辑 |
 | P3 | AI 摘要 / 翻译仍为占位 | 不能作为真实 AI 功能验收 | 报告中不将其列入已完成测试范围 |
 
-## 7. 总体结论
+## 8. 总体结论
 
 本轮 macOS Feed / Reader / GUI smoke 分组自动化测试通过：
 
@@ -210,4 +303,7 @@ Storage 无 Qt 依赖隔离测试通过：
 1. 自动化 smoke 测试通过。
 2. Storage 自动化测试通过。
 3. Storage 无 Qt 依赖隔离测试通过。
-4. 真实 GUI 内容展示仍未达到完整验收标准。
+4. OPML 解析和默认 StorageService 路径手工验证通过。
+5. Reader Pipeline 手工验证中基础清洗通过，但标题识别为 `[no-title]`。
+6. DBLP 科研源可导入，但摘要内容为空，适合目录聚合，不适合完整正文阅读。
+7. 真实 GUI 内容展示仍未达到完整验收标准。
