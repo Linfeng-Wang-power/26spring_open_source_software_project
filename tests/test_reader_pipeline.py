@@ -55,6 +55,19 @@ def test_sanitizer_removes_script_and_repairs_relative_urls() -> None:
     assert 'src="https://example.test/posts/cover.png"' in cleaned
 
 
+def test_sanitizer_promotes_lazy_image_urls() -> None:
+    cleaned = clean_reader_html(
+        '<p><img data-src="/lazy.png"></p>'
+        '<p><img srcset="/small.png 320w, /large.png 960w"></p>',
+        "https://example.test/posts/one",
+    )
+
+    assert 'src="https://example.test/lazy.png"' in cleaned
+    assert 'src="https://example.test/small.png"' in cleaned
+    assert "data-src" not in cleaned
+    assert "srcset" not in cleaned
+
+
 def test_markdown_converter_preserves_links_and_images() -> None:
     markdown = html_to_markdown(
         '<h2>Title</h2><p><a href="https://example.test">Link</a></p>'

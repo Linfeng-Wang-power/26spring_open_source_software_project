@@ -79,16 +79,11 @@ class ReaderPipelineService:
 
         url = getattr(article, "url", "")
         if not url:
-            title = getattr(article, "title", "Untitled")
-            return f"当前文章没有可抓取的 URL：{title}"
+            return f"当前文章没有可抓取的 URL：{getattr(article, 'title', 'Untitled')}"
 
         document = self.fetch_and_process(url)
-        return _format_clean_summary(document)
-
-
-def _format_clean_summary(document: ReaderDocument) -> str:
-    return (
-        f"已清洗：{document.title}\n\n"
-        f"cleaned_html：{len(document.cleaned_html)} 字符\n"
-        f"canonical_markdown：{len(document.canonical_markdown)} 字符"
-    )
+        return (
+            f"已清洗：{document.title}\n\n"
+            f"cleaned_html：{len(document.cleaned_html)} 字符\n"
+            f"canonical_markdown：{len(document.canonical_markdown)} 字符"
+        )

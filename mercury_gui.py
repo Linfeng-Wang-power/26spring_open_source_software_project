@@ -1,4 +1,4 @@
-"""Mercury PySide6 GUI scaffold.
+"""Lumen PySide6 GUI scaffold.
 
 Run:
     python3 mercury_gui.py
@@ -10,14 +10,18 @@ Install GUI dependency if needed:
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Protocol
 
+import httpx
+
 try:
-    from PySide6.QtCore import Qt, QSize
-    from PySide6.QtGui import QAction, QFont, QIcon
+    from PySide6.QtCore import QObject, Qt, QThread, QSize, Signal, Slot
+    from PySide6.QtGui import QAction, QFont, QIcon, QImage, QTextDocument
     from PySide6.QtWidgets import (
         QApplication,
+        QAbstractItemView,
         QButtonGroup,
         QFrame,
         QFileDialog,
@@ -41,8 +45,9 @@ except ModuleNotFoundError as exc:
     print("PySide6 未安装。请先运行：pip install PySide6")
     raise SystemExit(1) from exc
 
-from mercury_feed import LocalFeedService
+from mercury_storage import StorageService
 from reader import ReaderPipelineService
+from reader.models import ReaderDocument
 
 
 # -----------------------------
@@ -73,6 +78,8 @@ class Article:
     url: str
     summary: str
     markdown: str
+    stable_id: str = ""
+    entry_id: str = ""
     tags: tuple[str, ...] = ()
     starred: bool = False
     unread: bool = True
@@ -92,16 +99,46 @@ class FeedService(Protocol):
     def list_feeds(self) -> list[Feed]:
         ...
 
-    def list_articles(self, feed_title: str | None = None) -> list[Article]:
+    def list_articles(self, feed_title: str | None = None, unread_only: bool = False) -> list[Article]:
         ...
 
     def add_feed(self, url: str) -> None:
+        ...
+
+    def delete_feed(self, feed_title: str) -> None:
+        ...
+
+    def delete_feeds(self, feed_titles: list[str]) -> None:
         ...
 
     def import_opml(self, path: str) -> None:
         ...
 
     def refresh_all(self) -> None:
+        ...
+
+    def set_article_starred(self, entry_id: str, starred: bool) -> None:
+        ...
+
+    def set_article_unread(self, entry_id: str, unread: bool) -> None:
+        ...
+
+    def list_tags(self) -> list[tuple[str, int]]:
+        ...
+
+    def list_articles_by_tag(self, tag: str, unread_only: bool = False) -> list[Article]:
+        ...
+
+    def add_article_tag(self, entry_id: str, tag: str) -> None:
+        ...
+
+    def remove_article_tag(self, entry_id: str, tag: str) -> None:
+        ...
+
+    def mark_tag_read(self, tag: str) -> None:
+        ...
+
+    def star_tag_articles(self, tag: str, starred: bool = True) -> None:
         ...
 
 
@@ -141,6 +178,148 @@ class TranslationAgent(Protocol):
 
     def translate(self, article: Article, target_language: str = "zh-CN") -> str:
         ...
+
+
+class ReaderTextBrowser(QTextBrowser):
+    """QTextBrowser with explicit remote image loading for reader content."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._image_cache: dict[str, QImage] = {}
+
+    def loadResource(self, resource_type: int, name: object) -> object:
+        image_resource = QTextDocument.ResourceType.ImageResource
+        if getattr(resource_type, "value", resource_type) != getattr(image_resource, "value", image_resource):
+            return super().loadResource(resource_type, name)
+
+        url = name.toString() if hasattr(name, "toString") else str(name)
+        if not url.startswith(("http://", "https://")):
+            return super().loadResource(resource_type, name)
+
+        cached = self._image_cache.get(url)
+        if cached is not None:
+            return cached
+
+        try:
+            response = httpx.get(
+                url,
+                follow_redirects=True,
+                timeout=8.0,
+                headers={"User-Agent": "MercuryPyQt/0.1 (+local-first RSS reader)"},
+            )
+            response.raise_for_status()
+            image = QImage()
+            image.loadFromData(response.content)
+        except Exception:
+            return super().loadResource(resource_type, name)
+
+        if image.isNull():
+            return super().loadResource(resource_type, name)
+
+        self._image_cache[url] = image
+        return image
+
+
+class CleanArticleWorker(QObject):
+    """Run article cleaning away from the Qt GUI thread."""
+
+    finished = Signal(object, str, str, str)
+    failed = Signal(str)
+
+    def __init__(self, pipeline: ReaderPipeline, article: Article) -> None:
+        super().__init__()
+        self.pipeline = pipeline
+        self.article = article
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            source_html = getattr(self.article, "source_html", "")
+            if source_html and hasattr(self.pipeline, "process_source_html"):
+                document = self.pipeline.process_source_html(
+                    source_html,
+                    source_url=self.article.url,
+                )
+            elif hasattr(self.pipeline, "fetch_and_process"):
+                document = self.pipeline.fetch_and_process(self.article.url)
+            else:
+                self.pipeline.clean_current_article(self.article)
+                document = None
+
+            if document is None:
+                self.failed.emit("当前 ReaderPipeline 没有返回可保存的清洗结果。")
+                return
+
+            message = (
+                f"已清洗：{document.title}\n\n"
+                f"cleaned_html：{len(document.cleaned_html)} 字符\n"
+                f"canonical_markdown：{len(document.canonical_markdown)} 字符"
+            )
+            self.finished.emit(
+                document,
+                message,
+                getattr(self.article, "entry_id", ""),
+                getattr(self.article, "url", ""),
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class RefreshFeedsWorker(QObject):
+    """Refresh feeds away from the Qt GUI thread."""
+
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, feed_service: FeedService) -> None:
+        super().__init__()
+        self.feed_service = feed_service
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            service = self.feed_service
+            if hasattr(service, "create_worker_copy"):
+                service = service.create_worker_copy()
+            service.refresh_all()
+            self.finished.emit(getattr(service, "last_error", "") or "")
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class CleanTagWorker(QObject):
+    """Clean all articles under one tag in a background thread."""
+
+    finished = Signal(int, str)
+    failed = Signal(str)
+
+    def __init__(self, feed_service: FeedService, pipeline: ReaderPipeline, tag: str) -> None:
+        super().__init__()
+        self.feed_service = feed_service
+        self.pipeline = pipeline
+        self.tag = tag
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            service = self.feed_service
+            if hasattr(service, "create_worker_copy"):
+                service = service.create_worker_copy()
+            articles = service.list_articles_by_tag(self.tag)
+            cleaned_count = 0
+            errors: list[str] = []
+            for article in articles:
+                try:
+                    if not article.entry_id:
+                        continue
+                    document = self.pipeline.fetch_and_process(article.url)
+                    service.save_reader_document(article.entry_id, document)
+                    cleaned_count += 1
+                except Exception as exc:
+                    errors.append(f"{article.title}: {exc}")
+            self.finished.emit(cleaned_count, "\n".join(errors))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class SettingsStore(Protocol):
@@ -243,16 +422,28 @@ class MockFeedService:
     def list_feeds(self) -> list[Feed]:
         return self.feeds
 
-    def list_articles(self, feed_title: str | None = None) -> list[Article]:
+    def list_articles(self, feed_title: str | None = None, unread_only: bool = False) -> list[Article]:
         if feed_title in (None, "All Feeds"):
-            return self.articles
-        if feed_title == "Starred":
-            return [article for article in self.articles if article.starred]
-        return [article for article in self.articles if article.feed_title == feed_title]
+            articles = self.articles
+        elif feed_title == "Starred":
+            articles = [article for article in self.articles if article.starred]
+        else:
+            articles = [article for article in self.articles if article.feed_title == feed_title]
+        if unread_only:
+            articles = [article for article in articles if article.unread]
+        return articles
 
     def add_feed(self, url: str) -> None:
         # Interface placeholder: real implementation should validate and persist the feed.
         print(f"TODO FeedService.add_feed({url!r})")
+
+    def delete_feed(self, feed_title: str) -> None:
+        self.feeds = [feed for feed in self.feeds if feed.title != feed_title]
+        self.articles = [article for article in self.articles if article.feed_title != feed_title]
+
+    def delete_feeds(self, feed_titles: list[str]) -> None:
+        for title in feed_titles:
+            self.delete_feed(title)
 
     def import_opml(self, path: str) -> None:
         # Interface placeholder: real implementation should parse OPML and insert feeds.
@@ -261,6 +452,37 @@ class MockFeedService:
     def refresh_all(self) -> None:
         # Interface placeholder: real implementation should run feed sync in a worker.
         print("TODO FeedService.refresh_all()")
+
+    def set_article_starred(self, entry_id: str, starred: bool) -> None:
+        print(f"TODO FeedService.set_article_starred({entry_id!r}, {starred!r})")
+
+    def set_article_unread(self, entry_id: str, unread: bool) -> None:
+        print(f"TODO FeedService.set_article_unread({entry_id!r}, {unread!r})")
+
+    def list_tags(self) -> list[tuple[str, int]]:
+        counts: dict[str, int] = {}
+        for article in self.articles:
+            for tag in article.tags:
+                counts[tag] = counts.get(tag, 0) + 1
+        return sorted(counts.items())
+
+    def list_articles_by_tag(self, tag: str, unread_only: bool = False) -> list[Article]:
+        articles = [article for article in self.articles if tag in article.tags]
+        if unread_only:
+            articles = [article for article in articles if article.unread]
+        return articles
+
+    def add_article_tag(self, entry_id: str, tag: str) -> None:
+        print(f"TODO FeedService.add_article_tag({entry_id!r}, {tag!r})")
+
+    def remove_article_tag(self, entry_id: str, tag: str) -> None:
+        print(f"TODO FeedService.remove_article_tag({entry_id!r}, {tag!r})")
+
+    def mark_tag_read(self, tag: str) -> None:
+        print(f"TODO FeedService.mark_tag_read({tag!r})")
+
+    def star_tag_articles(self, tag: str, starred: bool = True) -> None:
+        print(f"TODO FeedService.star_tag_articles({tag!r}, {starred!r})")
 
 
 class MockReaderPipeline:
@@ -381,7 +603,7 @@ class PillButton(QPushButton):
 class ArticleListItem(QWidget):
     """Custom article row matching the compact Mercury list style."""
 
-    def __init__(self, article: Article) -> None:
+    def __init__(self, article: Article, on_star_clicked: object | None = None) -> None:
         super().__init__()
         self.article = article
 
@@ -395,16 +617,24 @@ class ArticleListItem(QWidget):
         title = QLabel(article.title)
         title.setObjectName("ArticleItemTitle")
         title.setWordWrap(True)
+        title_font = title.font()
+        title_font.setBold(article.unread)
+        title.setFont(title_font)
 
-        meta = QLabel(f"{article.feed_title}\n{article.published}")
+        read_state = "未读" if article.unread else "已读"
+        meta = QLabel(f"{article.feed_title} · {read_state}\n{article.published}")
         meta.setObjectName("ArticleItemMeta")
 
         text_box.addWidget(title)
         text_box.addWidget(meta)
 
-        star = QLabel("★" if article.starred else "☆")
-        star.setObjectName("StarLabel")
-        star.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        star = QPushButton("★" if article.starred else "☆")
+        star.setObjectName("StarButton")
+        star.setToolTip("收藏" if not article.starred else "取消收藏")
+        star.setFixedWidth(30)
+        star.setCursor(Qt.PointingHandCursor)
+        if on_star_clicked is not None:
+            star.clicked.connect(lambda _checked=False, item=article: on_star_clicked(item))
 
         root.addLayout(text_box, 1)
         root.addWidget(star)
@@ -431,12 +661,23 @@ class MercuryMainWindow(QMainWindow):
         self.translation_agent = translation_agent
 
         self.current_feed_title: str | None = "Starred"
+        self.current_sidebar_mode = "feeds"
+        self.current_tag: str | None = None
         self.current_articles: list[Article] = []
         self.current_article: Article | None = None
+        self.skip_auto_read_entry_id: str | None = None
+        self.clean_thread: QThread | None = None
+        self.clean_worker: CleanArticleWorker | None = None
+        self.refresh_thread: QThread | None = None
+        self.refresh_worker: RefreshFeedsWorker | None = None
+        self.tag_clean_thread: QThread | None = None
+        self.tag_clean_worker: CleanTagWorker | None = None
+        self.unread_filter_enabled = False
+        self.last_refresh_status = "尚未刷新"
         self.sidebar_collapsed = False
         self.sidebar_expanded_width = 225
 
-        self.setWindowTitle("Mercury")
+        self.setWindowTitle("Lumen")
         self.resize(1380, 860)
         self.setMinimumSize(1080, 680)
 
@@ -457,7 +698,7 @@ class MercuryMainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        app_title = QLabel("  Mercury  ")
+        app_title = QLabel("  Lumen  ")
         app_title.setObjectName("ToolbarTitle")
         toolbar.addWidget(app_title)
         toolbar.addSeparator()
@@ -476,9 +717,51 @@ class MercuryMainWindow(QMainWindow):
         self.import_opml_action.triggered.connect(self.on_import_opml)
         toolbar.addAction(self.import_opml_action)
 
+        self.delete_feed_action = QAction("删除订阅", self)
+        self.delete_feed_action.triggered.connect(self.on_delete_feed)
+        toolbar.addAction(self.delete_feed_action)
+
+        self.batch_delete_feed_action = QAction("批量删除", self)
+        self.batch_delete_feed_action.setToolTip("删除左侧已勾选的订阅")
+        self.batch_delete_feed_action.triggered.connect(self.on_batch_delete_feeds)
+        toolbar.addAction(self.batch_delete_feed_action)
+
         self.clean_action = QAction("清洗", self)
         self.clean_action.triggered.connect(self.on_clean_article)
         toolbar.addAction(self.clean_action)
+
+        self.restore_action = QAction("还原", self)
+        self.restore_action.setToolTip("显示文章未清洗前的摘要/原始列表内容")
+        self.restore_action.triggered.connect(self.on_restore_article)
+        toolbar.addAction(self.restore_action)
+
+        self.star_action = QAction("收藏", self)
+        self.star_action.triggered.connect(self.on_toggle_starred)
+        toolbar.addAction(self.star_action)
+
+        self.read_action = QAction("标记已读", self)
+        self.read_action.triggered.connect(self.on_toggle_read_state)
+        toolbar.addAction(self.read_action)
+
+        self.add_tag_action = QAction("添加标签", self)
+        self.add_tag_action.triggered.connect(self.on_add_article_tag)
+        toolbar.addAction(self.add_tag_action)
+
+        self.remove_tag_action = QAction("移除标签", self)
+        self.remove_tag_action.triggered.connect(self.on_remove_article_tag)
+        toolbar.addAction(self.remove_tag_action)
+
+        self.tag_mark_read_action = QAction("标签标已读", self)
+        self.tag_mark_read_action.triggered.connect(self.on_mark_current_tag_read)
+        toolbar.addAction(self.tag_mark_read_action)
+
+        self.tag_star_action = QAction("标签收藏", self)
+        self.tag_star_action.triggered.connect(self.on_star_current_tag)
+        toolbar.addAction(self.tag_star_action)
+
+        self.tag_clean_action = QAction("标签清洗", self)
+        self.tag_clean_action.triggered.connect(self.on_clean_current_tag)
+        toolbar.addAction(self.tag_clean_action)
 
         self.summary_action = QAction("摘要", self)
         self.summary_action.triggered.connect(self.on_summary)
@@ -549,7 +832,8 @@ class MercuryMainWindow(QMainWindow):
         layout.addLayout(segment)
 
         header = QHBoxLayout()
-        header.addWidget(make_section_title("Feeds"))
+        self.sidebar_title = make_section_title("Feeds")
+        header.addWidget(self.sidebar_title)
         header.addStretch(1)
         add_feed_btn = QPushButton("+")
         add_feed_btn.setObjectName("IconButton")
@@ -560,12 +844,15 @@ class MercuryMainWindow(QMainWindow):
 
         self.feed_list = QListWidget()
         self.feed_list.setObjectName("FeedList")
-        self.feed_list.currentItemChanged.connect(self.on_feed_selected)
+        self.feed_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.feed_list.currentItemChanged.connect(self.on_sidebar_item_selected)
+        self.feed_list.itemSelectionChanged.connect(self._refresh_action_states)
+        self.feed_list.itemChanged.connect(lambda _item: self._refresh_action_states())
         layout.addWidget(self.feed_list, 1)
 
-        footer = QLabel("Feeds: 86 · Entries: 3054 · Unread: 0\nLast sync: 2m ago")
-        footer.setObjectName("SidebarFooter")
-        layout.addWidget(footer)
+        self.sidebar_footer = QLabel("")
+        self.sidebar_footer.setObjectName("SidebarFooter")
+        layout.addWidget(self.sidebar_footer)
         return sidebar
 
     def _create_article_panel(self) -> QWidget:
@@ -591,11 +878,12 @@ class MercuryMainWindow(QMainWindow):
         more_btn.clicked.connect(self.on_more_filters)
         header_layout.addWidget(more_btn)
 
-        unread_btn = QPushButton("Unread")
-        unread_btn.setObjectName("SmallToolbarButton")
-        unread_btn.setToolTip("未读过滤接口占位")
-        unread_btn.clicked.connect(self.on_unread_filter)
-        header_layout.addWidget(unread_btn)
+        self.unread_filter_btn = QPushButton("Unread")
+        self.unread_filter_btn.setObjectName("SmallToolbarButton")
+        self.unread_filter_btn.setToolTip("只显示未读文章")
+        self.unread_filter_btn.setCheckable(True)
+        self.unread_filter_btn.clicked.connect(self.on_unread_filter)
+        header_layout.addWidget(self.unread_filter_btn)
         layout.addWidget(header)
 
         self.article_list = QListWidget()
@@ -611,7 +899,7 @@ class MercuryMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.reader = QTextBrowser()
+        self.reader = ReaderTextBrowser()
         self.reader.setObjectName("Reader")
         self.reader.setOpenExternalLinks(True)
         layout.addWidget(self.reader, 1)
@@ -781,9 +1069,16 @@ class MercuryMainWindow(QMainWindow):
                 line-height: 1.3;
                 color: #858585;
             }
-            QLabel#StarLabel {
+            QPushButton#StarButton {
+                border: 0;
+                background: transparent;
                 color: #0a84ff;
                 font-size: 18px;
+                padding: 0;
+            }
+            QPushButton#StarButton:hover {
+                background: #edf3ff;
+                border-radius: 6px;
             }
             QLabel#SidebarFooter {
                 font-size: 11px;
@@ -933,24 +1228,69 @@ class MercuryMainWindow(QMainWindow):
     # -----------------------------
 
     def _load_feeds(self) -> None:
+        selected_title = self.current_feed_title
+        self.current_sidebar_mode = "feeds"
+        self.current_tag = None
+        self.sidebar_title.setText("Feeds")
+        previous_block_state = self.feed_list.blockSignals(True)
         self.feed_list.clear()
-        for feed in self.feed_service.list_feeds():
-            item = QListWidgetItem()
-            label = f"{feed.title} ({feed.unread_count})" if feed.unread_count else feed.title
-            item.setText(label)
-            item.setData(Qt.UserRole, feed.title)
-            self.feed_list.addItem(item)
-            if feed.title == self.current_feed_title:
-                self.feed_list.setCurrentItem(item)
+        try:
+            for feed in self.feed_service.list_feeds():
+                item = QListWidgetItem()
+                label = f"{feed.title} ({feed.unread_count})" if feed.unread_count else feed.title
+                item.setText(label)
+                item.setData(Qt.UserRole, ("feed", feed.title))
+                if feed.title not in {"All Feeds", "Starred"}:
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(Qt.Unchecked)
+                self.feed_list.addItem(item)
+                if feed.title == selected_title:
+                    self.feed_list.setCurrentItem(item)
+        finally:
+            self.feed_list.blockSignals(previous_block_state)
+        self._update_sidebar_footer()
+        self._refresh_action_states()
+
+    def _load_tags(self) -> None:
+        selected_tag = self.current_tag
+        self.current_sidebar_mode = "tags"
+        self.current_feed_title = None
+        self.sidebar_title.setText("Tags")
+        previous_block_state = self.feed_list.blockSignals(True)
+        self.feed_list.clear()
+        try:
+            for tag, count in self.feed_service.list_tags():
+                item = QListWidgetItem()
+                item.setText(f"{tag} ({count})")
+                item.setData(Qt.UserRole, ("tag", tag))
+                self.feed_list.addItem(item)
+                if tag == selected_tag:
+                    self.feed_list.setCurrentItem(item)
+        finally:
+            self.feed_list.blockSignals(previous_block_state)
+        self._update_sidebar_footer()
+        self._refresh_action_states()
 
     def _load_articles(self, feed_title: str | None = None) -> None:
-        self.current_articles = self.feed_service.list_articles(feed_title)
+        if self.current_sidebar_mode == "tags" and self.current_tag:
+            self.current_articles = self.feed_service.list_articles_by_tag(
+                self.current_tag,
+                unread_only=self.unread_filter_enabled,
+            )
+            scope = f"Tag: {self.current_tag}"
+        else:
+            self.current_articles = self.feed_service.list_articles(
+                feed_title,
+                unread_only=self.unread_filter_enabled,
+            )
+            scope = feed_title or "All Feeds"
         self.article_list.clear()
-        self.article_scope_label.setText(feed_title or "All Feeds")
+        self.article_scope_label.setText(f"{scope} · 未读" if self.unread_filter_enabled else scope)
+        self.unread_filter_btn.setChecked(self.unread_filter_enabled)
 
         for article in self.current_articles:
             item = QListWidgetItem()
-            widget = ArticleListItem(article)
+            widget = ArticleListItem(article, self.on_toggle_starred_from_list)
             item.setSizeHint(QSize(280, 72))
             item.setData(Qt.UserRole, article)
             self.article_list.addItem(item)
@@ -961,22 +1301,146 @@ class MercuryMainWindow(QMainWindow):
         else:
             self.current_article = None
             self.reader.setHtml("<p style='padding:32px;color:#777;'>没有文章。</p>")
+            self._refresh_action_states()
+
+    def _update_sidebar_footer(self) -> None:
+        if self.current_sidebar_mode == "tags":
+            tag_count = len(self.feed_service.list_tags())
+            self.sidebar_footer.setText(f"Tags: {tag_count}\nLast refresh: {self.last_refresh_status}")
+            return
+
+        feeds = self.feed_service.list_feeds()
+        real_feeds = [feed for feed in feeds if feed.title not in {"All Feeds", "Starred"}]
+        unread = next((feed.unread_count for feed in feeds if feed.title == "All Feeds"), 0)
+        self.sidebar_footer.setText(
+            f"Feeds: {len(real_feeds)} · Unread: {unread}\nLast refresh: {self.last_refresh_status}"
+        )
 
     def _show_article(self, article: Article) -> None:
+        should_skip_auto_read = (
+            article.unread
+            and article.entry_id
+            and self.skip_auto_read_entry_id == article.entry_id
+        )
+        if should_skip_auto_read:
+            self.skip_auto_read_entry_id = None
+        elif article.unread and getattr(article, "entry_id", ""):
+            try:
+                self.feed_service.set_article_unread(article.entry_id, False)
+                article = replace(article, unread=False)
+                current_item = self.article_list.currentItem()
+                if current_item is not None:
+                    current_item.setData(Qt.UserRole, article)
+                    self.article_list.setItemWidget(
+                        current_item,
+                        ArticleListItem(article, self.on_toggle_starred_from_list),
+                    )
+                self._load_feeds()
+            except Exception as exc:
+                self._show_error_dialog("更新已读状态失败", str(exc))
+
         self.current_article = article
-        self.reader.setHtml(self.reader_pipeline.render_article_html(article))
+        cached_document = self._cached_reader_document(article)
+        if cached_document is not None:
+            self.reader.setHtml(cached_document.reader_html)
+        else:
+            self.reader.setHtml(self.reader_pipeline.render_article_html(article))
         self.summary_text.setText(f"已打开：{article.title}")
+        self._refresh_action_states()
+
+    def _cached_reader_document(self, article: Article) -> ReaderDocument | None:
+        entry_id = getattr(article, "entry_id", "")
+        if not entry_id or not hasattr(self.feed_service, "get_reader_document"):
+            return None
+        return self.feed_service.get_reader_document(entry_id)
+
+    def _refresh_action_states(self) -> None:
+        article = self.current_article
+        has_article = article is not None
+        can_delete_feed = (
+            self.current_sidebar_mode == "feeds"
+            and bool(self._selected_feed_titles() or self.current_feed_title not in (None, "All Feeds", "Starred"))
+        )
+        has_tag = self.current_sidebar_mode == "tags" and bool(self.current_tag)
+
+        self.refresh_action.setEnabled(not (self.refresh_thread and self.refresh_thread.isRunning()))
+        self.delete_feed_action.setEnabled(can_delete_feed)
+        self.batch_delete_feed_action.setEnabled(self.current_sidebar_mode == "feeds" and bool(self._checked_feed_titles()))
+        self.clean_action.setEnabled(has_article and not (self.clean_thread and self.clean_thread.isRunning()))
+        self.restore_action.setEnabled(has_article)
+        self.star_action.setEnabled(has_article)
+        self.read_action.setEnabled(has_article)
+        self.add_tag_action.setEnabled(has_article)
+        self.remove_tag_action.setEnabled(has_article and bool(article.tags if article else ()))
+        self.tag_mark_read_action.setEnabled(has_tag)
+        self.tag_star_action.setEnabled(has_tag)
+        self.tag_clean_action.setEnabled(has_tag and not (self.tag_clean_thread and self.tag_clean_thread.isRunning()))
+
+        if has_article:
+            self.star_action.setText("取消收藏" if article.starred else "收藏")
+            self.read_action.setText("标记未读" if not article.unread else "标记已读")
+        else:
+            self.star_action.setText("收藏")
+            self.read_action.setText("标记已读")
+
+    def _reload_articles_preserving_selection(self, entry_id: str | None = None) -> None:
+        target_entry_id = entry_id or getattr(self.current_article, "entry_id", "")
+        if self.current_sidebar_mode == "tags":
+            self._load_tags()
+            self.current_articles = self.feed_service.list_articles_by_tag(
+                self.current_tag or "",
+                unread_only=self.unread_filter_enabled,
+            )
+            scope = f"Tag: {self.current_tag}" if self.current_tag else "Tags"
+        else:
+            self._load_feeds()
+            self.current_articles = self.feed_service.list_articles(
+                self.current_feed_title,
+                unread_only=self.unread_filter_enabled,
+            )
+            scope = self.current_feed_title or "All Feeds"
+        self.article_list.clear()
+        self.article_scope_label.setText(
+            f"{scope} · 未读" if self.unread_filter_enabled else scope
+        )
+
+        selected_row = 0
+        for index, article in enumerate(self.current_articles):
+            item = QListWidgetItem()
+            widget = ArticleListItem(article, self.on_toggle_starred_from_list)
+            item.setSizeHint(QSize(280, 72))
+            item.setData(Qt.UserRole, article)
+            self.article_list.addItem(item)
+            self.article_list.setItemWidget(item, widget)
+            if target_entry_id and article.entry_id == target_entry_id:
+                selected_row = index
+
+        if self.current_articles:
+            self.article_list.setCurrentRow(selected_row)
+        else:
+            self.current_article = None
+            self.reader.setHtml("<p style='padding:32px;color:#777;'>没有文章。</p>")
+            self._refresh_action_states()
 
     # -----------------------------
     # Event handlers
     # -----------------------------
 
-    def on_feed_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+    def on_sidebar_item_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
             return
-        feed_title = current.data(Qt.UserRole)
-        self.current_feed_title = feed_title
-        self._load_articles(feed_title)
+        item_type, value = current.data(Qt.UserRole)
+        if item_type == "tag":
+            self.current_sidebar_mode = "tags"
+            self.current_tag = value
+            self.current_feed_title = None
+            self._load_articles(None)
+            return
+
+        self.current_sidebar_mode = "feeds"
+        self.current_tag = None
+        self.current_feed_title = value
+        self._load_articles(value)
 
     def on_article_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
@@ -986,8 +1450,35 @@ class MercuryMainWindow(QMainWindow):
             self._show_article(article)
 
     def on_search_changed(self, text: str) -> None:
-        # Interface placeholder: real search should query EntryStore by title/summary.
         lowered = text.strip().lower()
+        if lowered.startswith("tag:"):
+            tag = text.strip()[4:].strip()
+            if tag:
+                self.current_articles = self.feed_service.list_articles_by_tag(
+                    tag,
+                    unread_only=self.unread_filter_enabled,
+                )
+                self.article_list.clear()
+                self.article_scope_label.setText(f"Search tag: {tag}")
+                for article in self.current_articles:
+                    item = QListWidgetItem()
+                    widget = ArticleListItem(article, self.on_toggle_starred_from_list)
+                    item.setSizeHint(QSize(280, 72))
+                    item.setData(Qt.UserRole, article)
+                    self.article_list.addItem(item)
+                    self.article_list.setItemWidget(item, widget)
+                if self.current_articles:
+                    self.article_list.setCurrentRow(0)
+                else:
+                    self.current_article = None
+                    self.reader.setHtml("<p style='padding:32px;color:#777;'>没有匹配标签的文章。</p>")
+                    self._refresh_action_states()
+                return
+
+        if not lowered and self.article_scope_label.text().startswith("Search tag:"):
+            self._load_articles(self.current_feed_title)
+            return
+
         for row in range(self.article_list.count()):
             item = self.article_list.item(row)
             article = item.data(Qt.UserRole)
@@ -1007,46 +1498,30 @@ class MercuryMainWindow(QMainWindow):
             restored_reader_width = max(520, sizes[2] - self.sidebar_expanded_width)
             self.main_splitter.setSizes([self.sidebar_expanded_width, sizes[1], restored_reader_width])
             self.sidebar_collapsed = False
-            self._show_interface_dialog(
-                title="侧边栏已展开",
-                module="GUI / 体验",
-                interface="MainWindow.on_toggle_sidebar()",
-                current="恢复左侧 Feed / Tags 导航栏，保留当前选择和列表状态。",
-                next_step="后续可把折叠状态保存到 QSettings，重启应用后自动恢复。",
-                risk="跨平台 DPI 和窗口尺寸不同，折叠宽度需要用 QSplitter 动态计算。",
-            )
+            self.summary_text.setText("侧边栏已展开。")
         else:
             self.sidebar_expanded_width = max(180, sizes[0])
             self.main_splitter.setSizes([0, sizes[1], sizes[2] + sizes[0]])
             self.sidebar_collapsed = True
-            self._show_interface_dialog(
-                title="侧边栏已收起",
-                module="GUI / 体验",
-                interface="MainWindow.on_toggle_sidebar()",
-                current="将左侧 Feed / Tags 导航栏宽度设为 0，让 Reader 区获得更多空间。",
-                next_step="后续可增加窄栏图标模式，而不是完全隐藏侧边栏。",
-                risk="收起后用户需要明确知道如何恢复，因此工具栏入口必须保持可见。",
-            )
+            self.summary_text.setText("侧边栏已收起。")
 
     def on_feed_tab(self) -> None:
-        self._show_interface_dialog(
-            title="Feeds 视图",
-            module="GUI / Feed",
-            interface="FeedService.list_feeds()",
-            current="当前显示 mock Feed 列表，包括 All Feeds、Starred 和示例订阅源。",
-            next_step="接入真实 FeedStore，从 SQLite 读取订阅源和未读数量。",
-            risk="Feed 数量多时需要虚拟列表或分组，否则侧边栏可能变慢。",
-        )
+        self.current_feed_title = self.current_feed_title or "All Feeds"
+        self._load_feeds()
+        self._load_articles(self.current_feed_title)
 
     def on_tag_tab(self) -> None:
-        self._show_interface_dialog(
-            title="Tags 视图",
-            module="后续功能 / Tags",
-            interface="TagService.list_tags()",
-            current="当前只是保留入口，MVP 阶段不实现完整标签库。",
-            next_step="MVP 稳定后再接入标签筛选、标签库维护和 AI tag suggestions。",
-            risk="标签系统容易扩大范围，当前应避免影响 Feed、Reader、Summary、Translation 主线。",
-        )
+        self._load_tags()
+        if self.feed_list.count() > 0:
+            self.feed_list.setCurrentRow(0)
+        else:
+            self.current_tag = None
+            self.current_articles = []
+            self.article_list.clear()
+            self.article_scope_label.setText("Tags")
+            self.reader.setHtml("<p style='padding:32px;color:#777;'>还没有标签。</p>")
+            self.summary_text.setText("可以给文章添加自定义标签。")
+            self._refresh_action_states()
 
     def on_more_filters(self) -> None:
         self._show_interface_dialog(
@@ -1059,14 +1534,10 @@ class MercuryMainWindow(QMainWindow):
         )
 
     def on_unread_filter(self) -> None:
-        self._show_interface_dialog(
-            title="未读过滤",
-            module="Feed + 本地存储",
-            interface="EntryStore.list_entries(unread_only=True)",
-            current="当前按钮只是占位，不会改变 mock 数据。",
-            next_step="接入 SQLite 的 read_state 字段，点击后刷新文章列表。",
-            risk="批量标记已读和筛选条件要保持一致，避免用户看到过期列表。",
-        )
+        self.unread_filter_enabled = self.unread_filter_btn.isChecked()
+        self._load_articles(self.current_feed_title)
+        state = "开启" if self.unread_filter_enabled else "关闭"
+        self.summary_text.setText(f"未读筛选已{state}。")
 
     def on_summary_panel_toggle(self) -> None:
         self._show_interface_dialog(
@@ -1103,6 +1574,242 @@ class MercuryMainWindow(QMainWindow):
             risk="Feed URL 可能重定向、不可访问或不是有效 RSS / Atom，需要清晰错误提示。",
         )
 
+    def on_delete_feed(self) -> None:
+        if self.current_sidebar_mode != "feeds":
+            return
+        selected_titles = self._selected_feed_titles()
+        if not selected_titles and self.current_feed_title not in (None, "All Feeds", "Starred"):
+            selected_titles = [self.current_feed_title]
+        if not selected_titles:
+            return
+
+        title_text = "、".join(selected_titles[:3])
+        if len(selected_titles) > 3:
+            title_text += f" 等 {len(selected_titles)} 个订阅"
+        result = QMessageBox.question(
+            self,
+            "删除订阅",
+            f"确定要删除订阅“{title_text}”吗？\n相关文章和清洗缓存也会从本地数据库删除。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result != QMessageBox.Yes:
+            return
+        try:
+            if len(selected_titles) == 1:
+                self.feed_service.delete_feed(selected_titles[0])
+            else:
+                self.feed_service.delete_feeds(selected_titles)
+        except Exception as exc:
+            self._show_error_dialog("删除订阅失败", str(exc))
+            return
+
+        self.current_feed_title = "All Feeds"
+        self.current_article = None
+        self._load_feeds()
+        self._load_articles(self.current_feed_title)
+        self.summary_text.setText(f"已删除 {len(selected_titles)} 个订阅。")
+
+    def on_batch_delete_feeds(self) -> None:
+        if self.current_sidebar_mode != "feeds":
+            return
+        checked_titles = self._checked_feed_titles()
+        if not checked_titles:
+            self.summary_text.setText("请先勾选要删除的订阅。")
+            return
+
+        title_text = "、".join(checked_titles[:3])
+        if len(checked_titles) > 3:
+            title_text += f" 等 {len(checked_titles)} 个订阅"
+        result = QMessageBox.question(
+            self,
+            "批量删除订阅",
+            f"确定要删除“{title_text}”吗？\n相关文章和清洗缓存也会从本地数据库删除。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result != QMessageBox.Yes:
+            return
+
+        try:
+            self.feed_service.delete_feeds(checked_titles)
+        except Exception as exc:
+            self._show_error_dialog("批量删除订阅失败", str(exc))
+            return
+
+        self.current_feed_title = "All Feeds"
+        self.current_article = None
+        self._load_feeds()
+        self._load_articles(self.current_feed_title)
+        self.summary_text.setText(f"已批量删除 {len(checked_titles)} 个订阅。")
+
+    def _selected_feed_titles(self) -> list[str]:
+        titles: list[str] = []
+        for item in self.feed_list.selectedItems():
+            data = item.data(Qt.UserRole)
+            if not data:
+                continue
+            item_type, value = data
+            if item_type == "feed" and value not in {"All Feeds", "Starred"}:
+                titles.append(value)
+        return titles
+
+    def _checked_feed_titles(self) -> list[str]:
+        titles: list[str] = []
+        for row in range(self.feed_list.count()):
+            item = self.feed_list.item(row)
+            data = item.data(Qt.UserRole)
+            if not data:
+                continue
+            item_type, value = data
+            if (
+                item_type == "feed"
+                and value not in {"All Feeds", "Starred"}
+                and item.checkState() == Qt.Checked
+            ):
+                titles.append(value)
+        return titles
+
+    def on_toggle_starred(self) -> None:
+        if not self.current_article:
+            return
+        self.on_toggle_starred_from_list(self.current_article)
+
+    def on_toggle_starred_from_list(self, article: Article) -> None:
+        try:
+            self.feed_service.set_article_starred(article.entry_id, not article.starred)
+        except Exception as exc:
+            self._show_error_dialog("收藏状态更新失败", str(exc))
+            return
+        self._reload_articles_preserving_selection(article.entry_id)
+
+    def on_toggle_read_state(self) -> None:
+        if not self.current_article:
+            return
+        article = self.current_article
+        new_unread = not article.unread
+        try:
+            self.feed_service.set_article_unread(article.entry_id, new_unread)
+        except Exception as exc:
+            self._show_error_dialog("已读状态更新失败", str(exc))
+            return
+        if new_unread:
+            self.skip_auto_read_entry_id = article.entry_id
+        self._reload_articles_preserving_selection(article.entry_id)
+
+    def on_add_article_tag(self) -> None:
+        if not self.current_article:
+            return
+        tag, accepted = QInputDialog.getText(
+            self,
+            "添加标签",
+            "请输入标签名称：",
+            text="稍后读",
+        )
+        if not accepted or not tag.strip():
+            return
+        try:
+            self.feed_service.add_article_tag(self.current_article.entry_id, tag.strip())
+        except Exception as exc:
+            self._show_error_dialog("添加标签失败", str(exc))
+            return
+        self.summary_text.setText(f"已添加标签：{tag.strip()}")
+        if self.current_sidebar_mode == "tags":
+            self._load_tags()
+        self._reload_articles_preserving_selection(self.current_article.entry_id)
+
+    def on_remove_article_tag(self) -> None:
+        if not self.current_article or not self.current_article.tags:
+            return
+        tag, accepted = QInputDialog.getItem(
+            self,
+            "移除标签",
+            "请选择要移除的标签：",
+            list(self.current_article.tags),
+            0,
+            False,
+        )
+        if not accepted or not tag:
+            return
+        try:
+            self.feed_service.remove_article_tag(self.current_article.entry_id, tag)
+        except Exception as exc:
+            self._show_error_dialog("移除标签失败", str(exc))
+            return
+        self.summary_text.setText(f"已移除标签：{tag}")
+        if self.current_sidebar_mode == "tags":
+            self._load_tags()
+        self._reload_articles_preserving_selection(self.current_article.entry_id)
+
+    def on_mark_current_tag_read(self) -> None:
+        if not self.current_tag:
+            return
+        try:
+            self.feed_service.mark_tag_read(self.current_tag)
+        except Exception as exc:
+            self._show_error_dialog("标签批量标已读失败", str(exc))
+            return
+        self.summary_text.setText(f"标签“{self.current_tag}”下的文章已标记为已读。")
+        self._reload_articles_preserving_selection()
+
+    def on_star_current_tag(self) -> None:
+        if not self.current_tag:
+            return
+        try:
+            self.feed_service.star_tag_articles(self.current_tag, True)
+        except Exception as exc:
+            self._show_error_dialog("标签批量收藏失败", str(exc))
+            return
+        self.summary_text.setText(f"标签“{self.current_tag}”下的文章已收藏。")
+        self._reload_articles_preserving_selection()
+
+    def on_clean_current_tag(self) -> None:
+        if not self.current_tag:
+            return
+        if self.tag_clean_thread is not None and self.tag_clean_thread.isRunning():
+            self.summary_text.setText("标签批量清洗正在进行，请稍候。")
+            return
+
+        tag = self.current_tag
+        self.tag_clean_action.setEnabled(False)
+        self.summary_text.setText(f"正在后台清洗标签“{tag}”下的文章。")
+        self.tag_clean_thread = QThread(self)
+        self.tag_clean_worker = CleanTagWorker(self.feed_service, self.reader_pipeline, tag)
+        self.tag_clean_worker.moveToThread(self.tag_clean_thread)
+        self.tag_clean_thread.started.connect(self.tag_clean_worker.run)
+        self.tag_clean_worker.finished.connect(self.on_clean_current_tag_finished)
+        self.tag_clean_worker.failed.connect(self.on_clean_current_tag_failed)
+        self.tag_clean_worker.finished.connect(self.tag_clean_thread.quit)
+        self.tag_clean_worker.failed.connect(self.tag_clean_thread.quit)
+        self.tag_clean_thread.finished.connect(self.tag_clean_worker.deleteLater)
+        self.tag_clean_thread.finished.connect(self.tag_clean_thread.deleteLater)
+        self.tag_clean_thread.finished.connect(self._clear_tag_clean_worker)
+        self.tag_clean_thread.start()
+
+    @Slot(int, str)
+    def on_clean_current_tag_finished(self, cleaned_count: int, errors: str) -> None:
+        self.summary_text.setText(f"标签批量清洗完成：{cleaned_count} 篇。")
+        self._reload_articles_preserving_selection()
+        if errors:
+            self._show_error_dialog("部分文章清洗失败", errors)
+
+    @Slot(str)
+    def on_clean_current_tag_failed(self, message: str) -> None:
+        self.summary_text.setText("标签批量清洗失败。")
+        self._show_error_dialog("标签批量清洗失败", message)
+
+    @Slot()
+    def _clear_tag_clean_worker(self) -> None:
+        self.tag_clean_thread = None
+        self.tag_clean_worker = None
+        self._refresh_action_states()
+
+    def on_restore_article(self) -> None:
+        if not self.current_article:
+            return
+        self.reader.setHtml(self.reader_pipeline.render_article_html(self.current_article))
+        self.summary_text.setText(f"已还原未清洗显示：{self.current_article.title}")
+
     def on_import_opml(self) -> None:
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
@@ -1129,38 +1836,105 @@ class MercuryMainWindow(QMainWindow):
         )
 
     def on_refresh_all(self) -> None:
-        # Interface placeholder: real sync must run in a worker, not in the GUI thread.
-        try:
-            self.feed_service.refresh_all()
-            self._load_feeds()
-            self._load_articles(self.current_feed_title)
-        except Exception as exc:
-            self._show_error_dialog("刷新订阅失败", str(exc))
+        if self.refresh_thread is not None and self.refresh_thread.isRunning():
+            self.summary_text.setText("订阅刷新正在进行，请稍候。")
             return
-        self.summary_text.setText("刷新接口已触发：之后接入 SyncService + TaskQueue。")
-        last_error = getattr(self.feed_service, "last_error", None)
-        self._show_interface_dialog(
-            title="刷新订阅",
-            module="Feed + 本地存储",
-            interface="SyncService.refresh_all()",
-            current="已调用真实 refresh_all()。"
-            + (f"<br/><br/>部分订阅失败：<br/><code>{last_error}</code>" if last_error else ""),
-            next_step="当前使用 httpx + 标准库 XML 解析 RSS / Atom；后续可替换为 feedparser 并写入 SQLite。",
-            risk="网络请求不能在 GUI 线程运行；单个 Feed 失败不能中断全部同步。",
-        )
+
+        self.refresh_action.setEnabled(False)
+        self.summary_text.setText("正在后台刷新订阅源。")
+        self.refresh_thread = QThread(self)
+        self.refresh_worker = RefreshFeedsWorker(self.feed_service)
+        self.refresh_worker.moveToThread(self.refresh_thread)
+        self.refresh_thread.started.connect(self.refresh_worker.run)
+        self.refresh_worker.finished.connect(self.on_refresh_all_finished)
+        self.refresh_worker.failed.connect(self.on_refresh_all_failed)
+        self.refresh_worker.finished.connect(self.refresh_thread.quit)
+        self.refresh_worker.failed.connect(self.refresh_thread.quit)
+        self.refresh_thread.finished.connect(self.refresh_worker.deleteLater)
+        self.refresh_thread.finished.connect(self.refresh_thread.deleteLater)
+        self.refresh_thread.finished.connect(self._clear_refresh_worker)
+        self.refresh_thread.start()
+
+    @Slot(str)
+    def on_refresh_all_finished(self, last_error: str) -> None:
+        self.last_refresh_status = datetime.now().strftime("%H:%M:%S")
+        if self.current_sidebar_mode == "tags":
+            self._load_tags()
+        else:
+            self._load_feeds()
+        self._load_articles(self.current_feed_title)
+        if last_error:
+            self.summary_text.setText(f"刷新完成于 {self.last_refresh_status}，但部分订阅失败。")
+            self._show_error_dialog("部分订阅刷新失败", last_error)
+        else:
+            self.summary_text.setText(f"订阅刷新完成：{self.last_refresh_status}")
+
+    @Slot(str)
+    def on_refresh_all_failed(self, message: str) -> None:
+        self.summary_text.setText("订阅刷新失败。")
+        self._show_error_dialog("刷新订阅失败", message)
+
+    @Slot()
+    def _clear_refresh_worker(self) -> None:
+        self.refresh_thread = None
+        self.refresh_worker = None
+        self.refresh_action.setEnabled(True)
 
     def on_clean_article(self) -> None:
         if not self.current_article:
             return
-        message = self.reader_pipeline.clean_current_article(self.current_article)
-        self._show_interface_dialog(
-            title="内容清洗",
-            module="内容清洗 / ReaderPipeline",
-            interface="ReaderPipeline.clean_current_article(article)",
-            current=message,
-            next_step="接入 httpx、readability-lxml、BeautifulSoup4、bleach、markdownify，生成 cleaned HTML 和 canonical Markdown。",
-            risk="图片、表格、代码块、相对链接容易在 HTML -> Markdown 过程中丢失或退化。",
-        )
+        if self.clean_thread is not None and self.clean_thread.isRunning():
+            self.summary_text.setText("内容清洗正在进行，请稍候。")
+            return
+
+        self.clean_action.setEnabled(False)
+        self.summary_text.setText(f"正在清洗：{self.current_article.title}")
+
+        self.clean_thread = QThread(self)
+        self.clean_worker = CleanArticleWorker(self.reader_pipeline, self.current_article)
+        self.clean_worker.moveToThread(self.clean_thread)
+        self.clean_thread.started.connect(self.clean_worker.run)
+        self.clean_worker.finished.connect(self.on_clean_article_finished)
+        self.clean_worker.failed.connect(self.on_clean_article_failed)
+        self.clean_worker.finished.connect(self.clean_thread.quit)
+        self.clean_worker.failed.connect(self.clean_thread.quit)
+        self.clean_thread.finished.connect(self.clean_worker.deleteLater)
+        self.clean_thread.finished.connect(self.clean_thread.deleteLater)
+        self.clean_thread.finished.connect(self._clear_clean_worker)
+        self.clean_thread.start()
+
+    @Slot(object, str, str, str)
+    def on_clean_article_finished(
+        self,
+        document: ReaderDocument,
+        message: str,
+        entry_id: str,
+        article_url: str,
+    ) -> None:
+        if entry_id and hasattr(self.feed_service, "save_reader_document"):
+            try:
+                self.feed_service.save_reader_document(entry_id, document)
+            except Exception as exc:
+                self._show_error_dialog("保存清洗结果失败", str(exc))
+
+        current_entry_id = getattr(self.current_article, "entry_id", "") if self.current_article else ""
+        current_url = getattr(self.current_article, "url", "") if self.current_article else ""
+        if (entry_id and entry_id == current_entry_id) or (not entry_id and article_url == current_url):
+            self.reader.setHtml(document.reader_html)
+            self.summary_text.setText(f"已清洗并显示：{document.title}")
+        else:
+            self.summary_text.setText(f"已清洗并缓存：{document.title}")
+
+    @Slot(str)
+    def on_clean_article_failed(self, message: str) -> None:
+        self.summary_text.setText("内容清洗失败。")
+        self._show_error_dialog("内容清洗失败", message)
+
+    @Slot()
+    def _clear_clean_worker(self) -> None:
+        self.clean_thread = None
+        self.clean_worker = None
+        self._refresh_action_states()
 
     def on_summary(self) -> None:
         if not self.current_article:
@@ -1206,11 +1980,11 @@ class MercuryMainWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Mercury")
-    app.setOrganizationName("Mercury Study Group")
+    app.setApplicationName("Lumen")
+    app.setOrganizationName("Lumen Study Group")
 
     window = MercuryMainWindow(
-        feed_service=LocalFeedService(),
+        feed_service=StorageService(),
         reader_pipeline=ReaderPipelineService(),
         summary_agent=MockSummaryAgent(),
         translation_agent=MockTranslationAgent(),
