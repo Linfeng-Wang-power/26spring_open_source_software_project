@@ -23,6 +23,10 @@ try:
         QApplication,
         QAbstractItemView,
         QButtonGroup,
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
         QFrame,
         QFileDialog,
         QHBoxLayout,
@@ -561,6 +565,137 @@ class MockSummaryAgent:
         return article.summary
 
 
+class SummarySettingsDialog(QDialog):
+    """User-facing config for the summary LLM provider.
+
+    base_url + model are stored in SettingsStore. The API key is stored in
+    the OS keyring (Keychain on macOS, Credential Locker on Windows). If
+    keyring is unavailable, the user is told to use the OPENAI_API_KEY env
+    variable.
+    """
+
+    def __init__(self, settings_store, current_detail: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("摘要 Provider 设置")
+        self.setMinimumWidth(420)
+        self._settings = settings_store
+
+        from agent.provider.keys import resolve_api_key
+
+        form = QFormLayout()
+        self.base_url_edit = QLineEdit(settings_store.get("llm.base_url", ""))
+        self.base_url_edit.setPlaceholderText("https://api.openai.com")
+        self.model_edit = QLineEdit(settings_store.get("llm.model", ""))
+        self.model_edit.setPlaceholderText("gpt-4o-mini")
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        existing_key = resolve_api_key()
+        if existing_key:
+            self.api_key_edit.setPlaceholderText("已存在 (留空则保留)")
+        else:
+            self.api_key_edit.setPlaceholderText("sk-...")
+
+        self.detail_combo = QComboBox()
+        for level, label in (("short", "简短"), ("default", "默认"), ("detailed", "详细")):
+            self.detail_combo.addItem(label, level)
+        idx = max(0, self.detail_combo.findData(current_detail))
+        self.detail_combo.setCurrentIndex(idx)
+
+        form.addRow("Base URL", self.base_url_edit)
+        form.addRow("模型", self.model_edit)
+        form.addRow("API Key", self.api_key_edit)
+        form.addRow("摘要详细度", self.detail_combo)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: #888888;")
+
+        self.test_button = QPushButton("测试连接")
+        self.test_button.clicked.connect(self._on_test_connection)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.addButton(self.test_button, QDialogButtonBox.ActionRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self.status_label)
+        layout.addWidget(buttons)
+
+    def _on_test_connection(self) -> None:
+        """Send a minimal chat-completions probe so the user knows whether
+        base_url / model / key actually work before saving."""
+        from agent.provider.keys import resolve_api_key
+        from agent.provider.llm_provider import (
+            ChatMessage,
+            ProviderAuthError,
+            ProviderConfig,
+            ProviderHTTPError,
+            ProviderTimeoutError,
+        )
+        from agent.provider.openai_compatible import OpenAICompatibleProvider
+
+        base_url = self.base_url_edit.text().strip()
+        model = self.model_edit.text().strip()
+        # Use the just-typed key when present; otherwise fall back to whatever is
+        # already stored so the user can verify an existing key.
+        typed_key = self.api_key_edit.text()
+        api_key = typed_key or (resolve_api_key() or "")
+
+        missing = []
+        if not base_url:
+            missing.append("Base URL")
+        if not model:
+            missing.append("模型")
+        if not api_key:
+            missing.append("API Key")
+        if missing:
+            self.status_label.setStyleSheet("color: #c0392b;")
+            self.status_label.setText("请先填写: " + ", ".join(missing))
+            return
+
+        self.status_label.setStyleSheet("color: #888888;")
+        self.status_label.setText("测试中…")
+        self.test_button.setEnabled(False)
+        QApplication.processEvents()
+
+        config = ProviderConfig(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            timeout_seconds=15.0,
+        )
+        try:
+            with OpenAICompatibleProvider(config) as provider:
+                text = provider.complete([ChatMessage("user", "ping")])
+            preview = (text or "").strip().splitlines()[0][:80] if text else "(空响应)"
+            self.status_label.setStyleSheet("color: #2e7d32;")
+            self.status_label.setText(f"连接成功: {preview}")
+        except ProviderAuthError as exc:
+            self.status_label.setStyleSheet("color: #c0392b;")
+            self.status_label.setText(f"鉴权失败: {exc}")
+        except ProviderTimeoutError as exc:
+            self.status_label.setStyleSheet("color: #c0392b;")
+            self.status_label.setText(f"超时: {exc}")
+        except ProviderHTTPError as exc:
+            self.status_label.setStyleSheet("color: #c0392b;")
+            self.status_label.setText(f"HTTP {exc.status_code}\n{exc}")
+        except Exception as exc:
+            self.status_label.setStyleSheet("color: #c0392b;")
+            self.status_label.setText(f"连接失败: {type(exc).__name__}: {exc}")
+        finally:
+            self.test_button.setEnabled(True)
+
+    def values(self) -> dict:
+        return {
+            "base_url": self.base_url_edit.text().strip(),
+            "model": self.model_edit.text().strip(),
+            "api_key": self.api_key_edit.text(),
+            "detail_level": self.detail_combo.currentData() or "default",
+        }
+
+
 class MockTranslationAgent:
     """Sample Translation Agent. Replace with segment-based Translation Agent later."""
 
@@ -672,6 +807,12 @@ class MercuryMainWindow(QMainWindow):
         self.refresh_worker: RefreshFeedsWorker | None = None
         self.tag_clean_thread: QThread | None = None
         self.tag_clean_worker: CleanTagWorker | None = None
+        self.summary_thread: QThread | None = None
+        self.summary_worker = None
+        self.summary_active_job = None
+        self.summary_job_counter = 0
+        self.summary_buffer = ""
+        self.summary_detail_level = "default"
         self.unread_filter_enabled = False
         self.last_refresh_status = "尚未刷新"
         self.sidebar_collapsed = False
@@ -680,6 +821,12 @@ class MercuryMainWindow(QMainWindow):
         self.setWindowTitle("Lumen")
         self.resize(1380, 860)
         self.setMinimumSize(1080, 680)
+
+        store = self._settings_store_or_none()
+        if store is not None:
+            saved_detail = store.get("summary.detail", "")
+            if saved_detail in ("short", "default", "detailed"):
+                self.summary_detail_level = saved_detail
 
         self._build_toolbar()
         self._build_layout()
@@ -906,6 +1053,12 @@ class MercuryMainWindow(QMainWindow):
         return panel
 
     def _create_summary_bar(self) -> QWidget:
+        container = QFrame()
+        container.setObjectName("SummaryContainer")
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
         bar = QFrame()
         bar.setObjectName("SummaryBar")
         layout = QHBoxLayout(bar)
@@ -934,7 +1087,19 @@ class MercuryMainWindow(QMainWindow):
         translate_btn.setObjectName("SecondaryActionButton")
         translate_btn.clicked.connect(self.on_translate)
         layout.addWidget(translate_btn)
-        return bar
+
+        outer.addWidget(bar)
+
+        self.summary_panel = QTextBrowser()
+        self.summary_panel.setObjectName("SummaryPanel")
+        self.summary_panel.setOpenExternalLinks(True)
+        self.summary_panel.setMinimumHeight(180)
+        self.summary_panel.setMaximumHeight(280)
+        self.summary_panel.setVisible(False)
+        outer.addWidget(self.summary_panel)
+        self.summary_panel_expanded = False
+
+        return container
 
     # -----------------------------
     # Styling
@@ -1101,6 +1266,14 @@ class MercuryMainWindow(QMainWindow):
             }
             QLabel#SummaryText {
                 color: #666666;
+            }
+            QTextBrowser#SummaryPanel {
+                background: #fdfdfd;
+                border: 0;
+                border-top: 1px solid #e5e5e5;
+                color: #1f2328;
+                padding: 12px 18px;
+                font-size: 13px;
             }
             QSplitter::handle {
                 background: #dddddd;
@@ -1345,7 +1518,7 @@ class MercuryMainWindow(QMainWindow):
             self.reader.setHtml(cached_document.reader_html)
         else:
             self.reader.setHtml(self.reader_pipeline.render_article_html(article))
-        self.summary_text.setText(f"已打开：{article.title}")
+        self._restore_summary_for_article(article)
         self._refresh_action_states()
 
     def _cached_reader_document(self, article: Article) -> ReaderDocument | None:
@@ -1540,14 +1713,9 @@ class MercuryMainWindow(QMainWindow):
         self.summary_text.setText(f"未读筛选已{state}。")
 
     def on_summary_panel_toggle(self) -> None:
-        self._show_interface_dialog(
-            title="Summary 面板",
-            module="GUI / Summary Agent",
-            interface="SummaryPanel.toggle()",
-            current="当前底部只显示一行摘要状态，尚未实现展开面板。",
-            next_step="实现可展开的摘要面板，包含目标语言、详细程度、生成、取消、复制、清除。",
-            risk="摘要生成是长任务，必须通过 AgentRuntime 投射状态，不能阻塞 GUI。",
-        )
+        self.summary_panel_expanded = not self.summary_panel_expanded
+        self.summary_panel.setVisible(self.summary_panel_expanded)
+        self.summary_toggle.setText("⌄" if self.summary_panel_expanded else "⌃")
 
     def on_add_feed(self) -> None:
         url, accepted = QInputDialog.getText(
@@ -1939,17 +2107,213 @@ class MercuryMainWindow(QMainWindow):
     def on_summary(self) -> None:
         if not self.current_article:
             return
-        # Interface placeholder: real SummaryAgent should run through AgentRuntime.
-        summary = self.summary_agent.summarize(self.current_article)
-        self.summary_text.setText(summary)
-        self._show_interface_dialog(
-            title="生成摘要",
-            module="Summary Agent",
-            interface="SummaryAgent.summarize(article)",
-            current=f"当前从 mock article 返回示例摘要：{summary}",
-            next_step="接入 YAML prompt template、LLMProvider、AgentRuntime，并把成功摘要保存到 SQLite。",
-            risk="长文可能超出 token；模型可能产生幻觉；失败或取消不能覆盖已有成功摘要。",
+        # If a job is already running for any entry, the second click cancels it.
+        if self.summary_thread is not None and self.summary_worker is not None:
+            self.summary_worker.request_cancel()
+            self.summary_text.setText("正在取消摘要…")
+            return
+
+        agent = self._ensure_summary_agent()
+        if agent is None:
+            return
+
+        article = self.current_article
+        entry_id = getattr(article, "entry_id", "") or ""
+        content = self._summary_input_for(article)
+        if not content.strip():
+            self._show_error_dialog("无法生成摘要", "当前文章没有可用的正文。")
+            return
+
+        target_lang = "zh-CN"
+        store = getattr(self.feed_service, "settings_store", None)
+        if store is not None and hasattr(store, "current_language"):
+            target_lang = store.current_language() or "zh-CN"
+
+        from agent.summary.summary_agent import SummaryRequest
+        from agent.summary.summary_worker import SummaryJob, SummaryWorker
+
+        self.summary_job_counter += 1
+        job = SummaryJob(job_id=self.summary_job_counter, entry_id=entry_id)
+        self.summary_active_job = job
+        self.summary_buffer = ""
+
+        request = SummaryRequest(
+            entry_id=entry_id,
+            title=article.title or "",
+            content=content,
+            target_language=target_lang,
+            detail_level=self.summary_detail_level,
         )
+
+        thread = QThread(self)
+        worker = SummaryWorker(agent, request, job)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.started.connect(self._on_summary_started)
+        worker.token.connect(self._on_summary_token)
+        worker.finished.connect(self._on_summary_finished)
+        worker.failed.connect(self._on_summary_failed)
+        worker.cancelled.connect(self._on_summary_cancelled)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        thread.finished.connect(self._clear_summary_worker)
+
+        self.summary_thread = thread
+        self.summary_worker = worker
+        thread.start()
+
+        self.summary_text.setText("正在生成摘要…")
+
+    # -- Summary helpers -----------------------------------------------------
+
+    def _ensure_summary_agent(self):
+        """Return an agent, or None after showing a config dialog."""
+        agent = getattr(self, "summary_agent", None)
+        if agent is not None and not isinstance(agent, MockSummaryAgent):
+            return agent
+
+        try:
+            from agent.summary.runtime_config import build_runtime
+        except Exception as exc:
+            self._show_error_dialog("摘要功能未就绪", str(exc))
+            return None
+
+        runtime, status = build_runtime(self._settings_store_or_none())
+        if runtime is None:
+            self._show_error_dialog(
+                "摘要 Provider 未配置",
+                f"{status.reason}\n\n请在设置中填写 Base URL / 模型 / API Key 后再试。",
+            )
+            return None
+
+        self.summary_agent = runtime
+        return runtime
+
+    def _settings_store_or_none(self):
+        return getattr(self.feed_service, "settings_store", None)
+
+    def _summary_input_for(self, article: Article) -> str:
+        """Prefer canonical_markdown from the reader pipeline, else article.summary."""
+        entry_id = getattr(article, "entry_id", "") or ""
+        document = self._cached_reader_document(article)
+        if document is not None and document.canonical_markdown.strip():
+            return document.canonical_markdown
+        return article.summary or ""
+
+    def _summary_store(self):
+        return getattr(self.feed_service, "summary_store", None)
+
+    def _restore_summary_for_article(self, article: Article) -> None:
+        store = self._summary_store()
+        entry_id = getattr(article, "entry_id", "") or ""
+        if store is None or not entry_id:
+            self.summary_text.setText("选择文章后可运行摘要。")
+            self._render_summary_panel("")
+            return
+        try:
+            cached = store.get(entry_id)
+        except Exception:
+            cached = None
+        if cached:
+            self.summary_text.setText(self._summary_status_preview(cached))
+            self._render_summary_panel(cached)
+            self._auto_expand_summary_panel()
+        else:
+            self.summary_text.setText(f"已打开：{article.title}")
+            self._render_summary_panel("")
+
+    def _render_summary_panel(self, text: str) -> None:
+        if not text:
+            self.summary_panel.clear()
+            return
+        try:
+            self.summary_panel.setMarkdown(text)
+        except Exception:
+            self.summary_panel.setPlainText(text)
+        # Keep view scrolled to the latest content during streaming.
+        cursor = self.summary_panel.textCursor()
+        cursor.movePosition(cursor.End)
+        self.summary_panel.setTextCursor(cursor)
+
+    def _auto_expand_summary_panel(self) -> None:
+        if not self.summary_panel_expanded:
+            self.summary_panel_expanded = True
+            self.summary_panel.setVisible(True)
+            self.summary_toggle.setText("⌄")
+
+    @staticmethod
+    def _summary_status_preview(text: str) -> str:
+        first_line = text.strip().splitlines()[0] if text.strip() else ""
+        return first_line[:60] + ("…" if len(first_line) > 60 else "")
+
+    @Slot(int, str)
+    def _on_summary_started(self, job_id: int, entry_id: str) -> None:
+        if not self._is_active_summary_job(job_id, entry_id):
+            return
+        self.summary_text.setText("正在生成摘要…")
+        self._render_summary_panel("")
+        self._auto_expand_summary_panel()
+
+    @Slot(int, str, str)
+    def _on_summary_token(self, job_id: int, entry_id: str, chunk: str) -> None:
+        if not self._is_active_summary_job(job_id, entry_id):
+            return
+        self.summary_buffer += chunk
+        if self._is_current_entry(entry_id):
+            self.summary_text.setText(f"生成中… {len(self.summary_buffer)} 字")
+            self._render_summary_panel(self.summary_buffer)
+
+    @Slot(int, str, str, str)
+    def _on_summary_finished(
+        self, job_id: int, entry_id: str, full_text: str, model_id: str
+    ) -> None:
+        if not self._is_active_summary_job(job_id, entry_id):
+            return
+        store = self._summary_store()
+        if store is not None and full_text.strip():
+            try:
+                store.save_result(entry_id, full_text, model_id)
+            except Exception as exc:
+                self._show_error_dialog("摘要保存失败", str(exc))
+        if self._is_current_entry(entry_id):
+            self.summary_text.setText(self._summary_status_preview(full_text))
+            self._render_summary_panel(full_text)
+            self._auto_expand_summary_panel()
+
+    @Slot(int, str, str)
+    def _on_summary_failed(self, job_id: int, entry_id: str, message: str) -> None:
+        if not self._is_active_summary_job(job_id, entry_id):
+            return
+        if self._is_current_entry(entry_id):
+            self.summary_text.setText("摘要生成失败。")
+        self._show_error_dialog("摘要生成失败", message)
+
+    @Slot(int, str)
+    def _on_summary_cancelled(self, job_id: int, entry_id: str) -> None:
+        if not self._is_active_summary_job(job_id, entry_id):
+            return
+        if self._is_current_entry(entry_id):
+            self._restore_summary_for_article(self.current_article)
+
+    @Slot()
+    def _clear_summary_worker(self) -> None:
+        self.summary_thread = None
+        self.summary_worker = None
+        self.summary_active_job = None
+        self.summary_buffer = ""
+
+    def _is_active_summary_job(self, job_id: int, entry_id: str) -> bool:
+        active = self.summary_active_job
+        return (
+            active is not None
+            and active.job_id == job_id
+            and active.entry_id == entry_id
+        )
+
+    def _is_current_entry(self, entry_id: str) -> bool:
+        current = getattr(self.current_article, "entry_id", "") if self.current_article else ""
+        return bool(entry_id) and entry_id == current
 
     def on_translate(self) -> None:
         if not self.current_article:
@@ -1967,15 +2331,38 @@ class MercuryMainWindow(QMainWindow):
         )
 
     def on_open_settings(self) -> None:
-        # Interface placeholder: connect to provider/model/agent settings dialog.
-        self._show_interface_dialog(
-            title="设置",
-            module="Provider / Settings",
-            interface="SettingsDialog + ProviderStore",
-            current="当前只保留设置入口，尚未实现真实设置页面。",
-            next_step="实现 Provider、Model、Summary、Translation、语言和本地存储设置页。",
-            risk="API Key 不应明文写入数据库或日志；Provider base URL path 需要测试避免 404。",
-        )
+        store = self._settings_store_or_none()
+        if store is None:
+            self._show_error_dialog(
+                "设置不可用",
+                "当前 FeedService 没有暴露 settings_store。",
+            )
+            return
+
+        dialog = SummarySettingsDialog(store, self.summary_detail_level, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        values = dialog.values()
+        store.set("llm.base_url", values["base_url"])
+        store.set("llm.model", values["model"])
+        store.set("summary.detail", values["detail_level"])
+        self.summary_detail_level = values["detail_level"]
+
+        api_key = values["api_key"]
+        if api_key:
+            from agent.provider.keys import store_api_key
+
+            saved = store_api_key(api_key)
+            if not saved:
+                self._show_error_dialog(
+                    "API Key 未保存",
+                    "无法访问系统 keyring。请改用 OPENAI_API_KEY 环境变量。",
+                )
+
+        # Force re-bootstrap so next "生成摘要" picks up new config.
+        self.summary_agent = MockSummaryAgent()
+        self.summary_text.setText("Provider 设置已保存。")
 
 
 def main() -> int:

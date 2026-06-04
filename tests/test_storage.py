@@ -477,9 +477,24 @@ def test_storage_service_tag_operations(svc):
 
 
 def test_no_qt_import():
-    """mercury_storage must not import any Qt module."""
+    """mercury_storage must not import any Qt module.
+
+    Run in a fresh subprocess so plugins like pytest-qt that pre-import
+    PySide6 cannot taint sys.modules.
+    """
+    import subprocess
     import sys
-    import importlib
-    # Re-check sys.modules after import
-    qt_mods = [m for m in sys.modules if "PySide" in m or "PyQt" in m]
-    assert qt_mods == [], f"Unexpected Qt modules: {qt_mods}"
+
+    code = (
+        "import sys; import mercury_storage; "
+        "qt = [m for m in sys.modules if 'PySide' in m or 'PyQt' in m]; "
+        "print(qt)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    qt_mods = result.stdout.strip()
+    assert qt_mods == "[]", f"Unexpected Qt modules: {qt_mods}"
