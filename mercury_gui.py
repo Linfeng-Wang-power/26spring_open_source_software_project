@@ -2523,15 +2523,17 @@ class MercuryMainWindow(QMainWindow):
         seen = set()
         for it in items:
             data = it.data(Qt.UserRole)
-            if not isinstance(data, Article):
+            # Duck-typing: feed_service may return a feed-layer Article that is
+            # a different class from mercury_gui.Article. Accept anything that
+            # quacks like an article row.
+            if data is None or not hasattr(data, "title") or not hasattr(data, "entry_id"):
                 continue
             key = data.entry_id or id(data)
             if key in seen:
                 continue
             seen.add(key)
             articles.append(data)
-        # If only one row is selected, fall back to the currently focused article
-        # so users who didn't multi-select still get a useful action.
+        # Fallback so single-click + 批量摘要 still does something useful.
         if not articles and self.current_article is not None:
             articles.append(self.current_article)
         return articles
