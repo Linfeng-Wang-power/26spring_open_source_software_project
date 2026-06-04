@@ -813,6 +813,7 @@ class MercuryMainWindow(QMainWindow):
         self.summary_job_counter = 0
         self.summary_buffer = ""
         self.summary_detail_level = "default"
+        self.summary_target_lang = ""  # "" means follow UI language
         self.unread_filter_enabled = False
         self.last_refresh_status = "尚未刷新"
         self.sidebar_collapsed = False
@@ -827,6 +828,7 @@ class MercuryMainWindow(QMainWindow):
             saved_detail = store.get("summary.detail", "")
             if saved_detail in ("short", "default", "detailed"):
                 self.summary_detail_level = saved_detail
+            self.summary_target_lang = (store.get("summary.target_lang", "") or "").strip()
 
         self._build_toolbar()
         self._build_layout()
@@ -1077,6 +1079,22 @@ class MercuryMainWindow(QMainWindow):
         self.summary_text.setObjectName("SummaryText")
         self.summary_text.setWordWrap(False)
         layout.addWidget(self.summary_text, 1)
+
+        self.summary_lang_combo = QComboBox()
+        self.summary_lang_combo.setObjectName("SummaryLangCombo")
+        self.summary_lang_combo.setToolTip("摘要语言")
+        # Empty value means: follow the UI language (SettingsStore.current_language)
+        for value, label in (
+            ("", "跟随界面"),
+            ("zh-CN", "中文"),
+            ("en", "英文"),
+            ("ja", "日文"),
+        ):
+            self.summary_lang_combo.addItem(label, value)
+        idx = max(0, self.summary_lang_combo.findData(self.summary_target_lang))
+        self.summary_lang_combo.setCurrentIndex(idx)
+        self.summary_lang_combo.currentIndexChanged.connect(self._on_summary_lang_changed)
+        layout.addWidget(self.summary_lang_combo)
 
         run_summary_btn = QPushButton("生成摘要")
         run_summary_btn.setObjectName("PrimaryActionButton")
@@ -2124,10 +2142,7 @@ class MercuryMainWindow(QMainWindow):
             self._show_error_dialog("无法生成摘要", "当前文章没有可用的正文。")
             return
 
-        target_lang = "zh-CN"
-        store = getattr(self.feed_service, "settings_store", None)
-        if store is not None and hasattr(store, "current_language"):
-            target_lang = store.current_language() or "zh-CN"
+        target_lang = self._resolve_target_language()
 
         from agent.summary.summary_agent import SummaryRequest
         from agent.summary.summary_worker import SummaryJob, SummaryWorker
@@ -2192,6 +2207,23 @@ class MercuryMainWindow(QMainWindow):
 
     def _settings_store_or_none(self):
         return getattr(self.feed_service, "settings_store", None)
+
+    def _resolve_target_language(self) -> str:
+        """Pick the summary language: explicit override, else UI language, else zh-CN."""
+        if self.summary_target_lang:
+            return self.summary_target_lang
+        store = self._settings_store_or_none()
+        if store is not None and hasattr(store, "current_language"):
+            return store.current_language() or "zh-CN"
+        return "zh-CN"
+
+    @Slot(int)
+    def _on_summary_lang_changed(self, _index: int) -> None:
+        value = self.summary_lang_combo.currentData() or ""
+        self.summary_target_lang = value
+        store = self._settings_store_or_none()
+        if store is not None:
+            store.set("summary.target_lang", value)
 
     def _summary_input_for(self, article: Article) -> str:
         """Prefer canonical_markdown from the reader pipeline, else article.summary."""
