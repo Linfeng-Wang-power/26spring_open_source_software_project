@@ -648,7 +648,7 @@ class SummarySettingsDialog(QDialog):
         self.setMinimumWidth(420)
         self._settings = settings_store
 
-        from agent.provider.keys import resolve_api_key
+        from mercury.agent.provider.keys import resolve_api_key
 
         form = QFormLayout()
         self.base_url_edit = QLineEdit(settings_store.get("llm.base_url", ""))
@@ -694,15 +694,15 @@ class SummarySettingsDialog(QDialog):
     def _on_test_connection(self) -> None:
         """Send a minimal chat-completions probe so the user knows whether
         base_url / model / key actually work before saving."""
-        from agent.provider.keys import resolve_api_key
-        from agent.provider.llm_provider import (
+        from mercury.agent.provider.keys import resolve_api_key
+        from mercury.agent.provider.llm_provider import (
             ChatMessage,
             ProviderAuthError,
             ProviderConfig,
             ProviderHTTPError,
             ProviderTimeoutError,
         )
-        from agent.provider.openai_compatible import OpenAICompatibleProvider
+        from mercury.agent.provider.openai_compatible import OpenAICompatibleProvider
 
         base_url = self.base_url_edit.text().strip()
         model = self.model_edit.text().strip()
@@ -2225,8 +2225,8 @@ class MercuryMainWindow(QMainWindow):
 
         target_lang = self._resolve_target_language()
 
-        from agent.summary.summary_agent import SummaryRequest
-        from agent.summary.summary_worker import SummaryJob, SummaryWorker
+        from mercury.agent.summary.summary_agent import SummaryRequest
+        from mercury.agent.summary.summary_worker import SummaryJob, SummaryWorker
 
         self.summary_job_counter += 1
         job = SummaryJob(job_id=self.summary_job_counter, entry_id=entry_id)
@@ -2270,7 +2270,7 @@ class MercuryMainWindow(QMainWindow):
             return agent
 
         try:
-            from agent.summary.runtime_config import build_runtime
+            from mercury.agent.summary.runtime_config import build_runtime
         except Exception as exc:
             self._show_error_dialog("摘要功能未就绪", str(exc))
             return None
@@ -2460,8 +2460,8 @@ class MercuryMainWindow(QMainWindow):
         store = self._summary_store()
         target_lang = self._resolve_target_language()
         items: list = []
-        from agent.summary.batch_worker import BatchSummaryItem
-        from agent.summary.summary_agent import SummaryRequest
+        from mercury.agent.summary.batch_worker import BatchSummaryItem
+        from mercury.agent.summary.summary_agent import SummaryRequest
 
         for article in articles:
             entry_id = getattr(article, "entry_id", "") or ""
@@ -2481,7 +2481,7 @@ class MercuryMainWindow(QMainWindow):
                 )
             )
 
-        from agent.summary.batch_worker import BatchSummaryWorker
+        from mercury.agent.summary.batch_worker import BatchSummaryWorker
 
         dialog = BatchSummaryDialog([it.title for it in items], self)
         thread = QThread(self)
@@ -2611,7 +2611,7 @@ class MercuryMainWindow(QMainWindow):
 
         api_key = values["api_key"]
         if api_key:
-            from agent.provider.keys import store_api_key
+            from mercury.agent.provider.keys import store_api_key
 
             saved = store_api_key(api_key)
             if not saved:
