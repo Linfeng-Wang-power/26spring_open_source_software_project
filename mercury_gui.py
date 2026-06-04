@@ -18,7 +18,7 @@ import httpx
 
 try:
     from PySide6.QtCore import QObject, Qt, QThread, QSize, Signal, Slot
-    from PySide6.QtGui import QAction, QFont, QIcon, QImage, QTextDocument
+    from PySide6.QtGui import QAction, QFont, QIcon, QImage, QTextCursor, QTextDocument
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -987,7 +987,9 @@ class MercuryMainWindow(QMainWindow):
         toolbar.addAction(self.summary_action)
 
         self.batch_summary_action = QAction("批量摘要", self)
-        self.batch_summary_action.setToolTip("为列表中所选文章逐个生成摘要")
+        self.batch_summary_action.setToolTip(
+            "在文章列表中按住 ⌘ / Ctrl 单击或 Shift 单击多选，然后点这里批量生成摘要"
+        )
         self.batch_summary_action.triggered.connect(self.on_batch_summary)
         toolbar.addAction(self.batch_summary_action)
 
@@ -1304,9 +1306,11 @@ class MercuryMainWindow(QMainWindow):
             }
             QListWidget#ArticleList::item {
                 border-bottom: 1px solid #eeeeee;
+                border-left: 3px solid transparent;
             }
             QListWidget#ArticleList::item:selected {
-                background: #dddddd;
+                background: #cfe3ff;
+                border-left: 3px solid #2469d6;
             }
             QFrame#ArticleHeader {
                 background: #ffffff;
@@ -1597,11 +1601,10 @@ class MercuryMainWindow(QMainWindow):
                 article = replace(article, unread=False)
                 current_item = self.article_list.currentItem()
                 if current_item is not None:
+                    # Update the item's stored Article in place. Replacing the
+                    # item widget here would clobber any multi-selection the
+                    # user has built up via Shift / Ctrl click.
                     current_item.setData(Qt.UserRole, article)
-                    self.article_list.setItemWidget(
-                        current_item,
-                        ArticleListItem(article, self.on_toggle_starred_from_list),
-                    )
                 self._load_feeds()
             except Exception as exc:
                 self._show_error_dialog("更新已读状态失败", str(exc))
@@ -2341,7 +2344,7 @@ class MercuryMainWindow(QMainWindow):
             self.summary_panel.setPlainText(text)
         # Keep view scrolled to the latest content during streaming.
         cursor = self.summary_panel.textCursor()
-        cursor.movePosition(cursor.End)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
         self.summary_panel.setTextCursor(cursor)
 
     def _auto_expand_summary_panel(self) -> None:
