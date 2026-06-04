@@ -6,6 +6,7 @@ milliseconds so the GUI is never overwhelmed by SSE chunk frequency.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 
@@ -37,14 +38,15 @@ class SummaryWorker(QObject):
 
     - ``started(job_id, entry_id)``       -- before the network call
     - ``token(job_id, entry_id, chunk)``  -- buffered streaming text
-    - ``finished(job_id, entry_id, full_text, model_id)``
+    - ``finished(job_id, entry_id, full_text, model_id, truncated)``
     - ``failed(job_id, entry_id, message)``
     - ``cancelled(job_id, entry_id)``
     """
 
     started = Signal(int, str)
     token = Signal(int, str, str)
-    finished = Signal(int, str, str, str)
+    # full_text, model_id, truncated_flag
+    finished = Signal(int, str, str, str, bool)
     failed = Signal(int, str, str)
     cancelled = Signal(int, str)
 
@@ -58,14 +60,14 @@ class SummaryWorker(QObject):
         self._agent = agent
         self._request = request
         self._job = job
-        self._cancel_requested = False
+        # threading.Event provides a real cross-thread synchronization
+        # primitive; a bare bool would rely on CPython's GIL semantics and
+        # break on free-threaded Python or alternative implementations.
+        self._cancel = threading.Event()
 
-    # The cancel flag is set from the GUI thread but read by the worker thread.
-    # Python's GIL makes this scalar read/write safe enough for an MVP without
-    # a QMutex; the worst case is one extra token after cancel.
     @Slot()
     def request_cancel(self) -> None:
-        self._cancel_requested = True
+        self._cancel.set()
 
     @Slot()
     def run(self) -> None:
@@ -78,8 +80,9 @@ class SummaryWorker(QObject):
         accumulated: list[str] = []
 
         try:
-            for delta in self._agent.stream_iter(self._request):
-                if self._cancel_requested:
+            meta, deltas = self._agent.prepare_stream(self._request)
+            for delta in deltas:
+                if self._cancel.is_set():
                     self.cancelled.emit(job_id, entry_id)
                     return
                 if not delta:
@@ -109,22 +112,29 @@ class SummaryWorker(QObject):
             self.failed.emit(job_id, entry_id, "Provider returned empty response")
             return
 
-        if self._cancel_requested:
+        if self._cancel.is_set():
             self.cancelled.emit(job_id, entry_id)
             return
 
-        model_id = f"{getattr(self._agent._provider, 'model', 'unknown')}@{self._agent.template.fingerprint}"
-        self.finished.emit(job_id, entry_id, full_text, model_id)
+        self.finished.emit(
+            job_id, entry_id, full_text, meta.model_id, meta.truncated
+        )
 
 
 def build_summary_result(
-    entry_id: str, full_text: str, model_id: str
+    entry_id: str, full_text: str, model_id: str, truncated: bool = False
 ) -> SummaryResult:
-    """Helper for tests / GUI to wrap the worker's terminal data."""
-    fingerprint = model_id.split("@")[-1] if "@" in model_id else ""
+    """Helper for tests / GUI to wrap the worker's terminal data.
+
+    ``model_id`` is expected to follow the ``model@fingerprint`` shape; if it
+    has no ``@``, ``template_fingerprint`` is left empty rather than
+    inheriting the whole string.
+    """
+    fingerprint = model_id.split("@", 1)[1] if "@" in model_id else ""
     return SummaryResult(
         entry_id=entry_id,
         text=full_text,
         model_id=model_id,
         template_fingerprint=fingerprint,
+        truncated=truncated,
     )

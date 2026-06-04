@@ -29,7 +29,11 @@ class SummaryAgentError(Exception):
 
 @dataclass(frozen=True)
 class SummaryRequest:
-    """Everything the agent needs to run one summary."""
+    """Everything the agent needs to run one summary.
+
+    Validation runs at construction time so callers fail fast before the
+    request reaches the network.
+    """
 
     entry_id: str
     title: str
@@ -37,6 +41,17 @@ class SummaryRequest:
     target_language: str = "zh-CN"
     detail_level: str = "default"
     max_content_chars: int = DEFAULT_MAX_CONTENT_CHARS
+
+    def __post_init__(self) -> None:
+        if self.detail_level not in DETAIL_LEVELS:
+            raise SummaryAgentError(
+                f"Invalid detail_level: {self.detail_level!r}; "
+                f"expected one of {DETAIL_LEVELS}"
+            )
+        if self.max_content_chars < 0:
+            raise SummaryAgentError(
+                f"max_content_chars must be non-negative, got {self.max_content_chars}"
+            )
 
 
 @dataclass(frozen=True)
@@ -48,6 +63,15 @@ class SummaryResult:
     model_id: str
     template_fingerprint: str
     truncated: bool = False
+
+
+@dataclass(frozen=True)
+class StreamMeta:
+    """Per-stream metadata that callers need before / after the iterator."""
+
+    model_id: str
+    template_fingerprint: str
+    truncated: bool
 
 
 def truncate_content(text: str, max_chars: int) -> tuple[str, bool]:
@@ -97,6 +121,20 @@ class SummaryAgent:
     def template(self) -> PromptTemplate:
         return self._template
 
+    @property
+    def provider_model(self) -> str:
+        """The backing model identifier. Required by the LLMProvider Protocol."""
+        return getattr(self._provider, "model")
+
+    def build_model_id(self) -> str:
+        """Public form of the per-result model tag.
+
+        Workers that drive the agent through ``prepare_stream`` use this so
+        they don't have to peek at private attributes or duplicate the
+        ``model@fingerprint`` format string.
+        """
+        return f"{self.provider_model}@{self._template.fingerprint}"
+
     def run(self, request: SummaryRequest) -> SummaryResult:
         """Non-streaming: call provider.complete(), return full result."""
         rendered, truncated = self._render(request)
@@ -108,10 +146,14 @@ class SummaryAgent:
         except Exception as exc:
             raise SummaryAgentError(f"Unexpected error: {exc}") from exc
 
+        full_text = (text or "").strip()
+        if not full_text:
+            raise SummaryAgentError("Provider returned empty response")
+
         return SummaryResult(
             entry_id=request.entry_id,
-            text=text.strip(),
-            model_id=self._model_tag(rendered),
+            text=full_text,
+            model_id=self.build_model_id(),
             template_fingerprint=rendered.template_fingerprint,
             truncated=truncated,
         )
@@ -127,12 +169,10 @@ class SummaryAgent:
         If *on_token* is provided, each delta is passed to the callback (useful
         for Qt worker signal throttling). Returns the assembled result.
         """
-        rendered, truncated = self._render(request)
-        messages = [ChatMessage(role=m.role, content=m.content) for m in rendered.messages]
-
+        meta, deltas = self.prepare_stream(request)
         accumulated: list[str] = []
         try:
-            for delta in self._provider.stream(messages):
+            for delta in deltas:
                 accumulated.append(delta)
                 if on_token:
                     on_token(delta)
@@ -148,20 +188,44 @@ class SummaryAgent:
         return SummaryResult(
             entry_id=request.entry_id,
             text=full_text,
-            model_id=self._model_tag(rendered),
+            model_id=meta.model_id,
+            template_fingerprint=meta.template_fingerprint,
+            truncated=meta.truncated,
+        )
+
+    def prepare_stream(
+        self, request: SummaryRequest
+    ) -> tuple[StreamMeta, Iterator[str]]:
+        """Render the prompt and start a provider stream.
+
+        Returns ``(StreamMeta, iterator)``. The metadata is available
+        immediately so callers can record model_id / truncated state before
+        consuming any tokens; the iterator yields raw deltas from the
+        provider as they arrive.
+        """
+        rendered, truncated = self._render(request)
+        messages = [ChatMessage(role=m.role, content=m.content) for m in rendered.messages]
+        meta = StreamMeta(
+            model_id=self.build_model_id(),
             template_fingerprint=rendered.template_fingerprint,
             truncated=truncated,
         )
+        return meta, self._provider.stream(messages)
 
     def stream_iter(self, request: SummaryRequest) -> Iterator[str]:
-        """Low-level iterator variant for callers who want raw deltas."""
-        rendered, _ = self._render(request)
-        messages = [ChatMessage(role=m.role, content=m.content) for m in rendered.messages]
-        yield from self._provider.stream(messages)
+        """Backwards-compatible iterator-only variant.
+
+        Prefer :meth:`prepare_stream` so you also get model_id / truncated.
+        """
+        _, deltas = self.prepare_stream(request)
+        yield from deltas
 
     # -- Internal -------------------------------------------------------------
 
     def _render(self, request: SummaryRequest) -> tuple[RenderedPrompt, bool]:
+        # detail_level was already validated in SummaryRequest.__post_init__,
+        # but keep a defensive check so future callers building rendered
+        # prompts directly cannot bypass it.
         if request.detail_level not in DETAIL_LEVELS:
             raise SummaryAgentError(
                 f"Invalid detail_level: {request.detail_level!r}; "
@@ -175,7 +239,3 @@ class SummaryAgent:
             "content": content,
         }
         return render_template(self._template, variables), truncated
-
-    def _model_tag(self, rendered: RenderedPrompt) -> str:
-        model = getattr(self._provider, "model", "unknown")
-        return f"{model}@{rendered.template_fingerprint}"

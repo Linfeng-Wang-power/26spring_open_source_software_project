@@ -189,3 +189,26 @@ model_id = f"{getattr(self._agent._provider, 'model', 'unknown')}@{self._agent.t
 ### 10.5 总结
 
 Summary Agent 的整体实现质量不错，架构分层合理，核心抽象（`LLMProvider` Protocol、`PromptTemplate`、`SummaryRequest/Result`）设计干净，具备良好的可测试性和可扩展性。主要改进方向集中在：补齐 `run()` 与 `stream()` 在空响应校验上的一致性、解决 `stream_iter` 路径丢失 `truncated` 标记和 `model_id` 重复拼装的问题、将 `model` 属性纳入 Provider 契约、以及补充 `truncate_content` 和 Worker 层的测试覆盖。这些问题大多不影响当前 MVP 的正确性，但在进入生产阶段前建议逐一处理。
+
+### 10.6 修复跟进（2026-06-04 当日）
+
+逐条对照 §10.2 / §10.3 的发现已落地：
+
+| 编号 | 问题 | 处理 |
+|---|---|---|
+| 10.2(1) | `run()` 缺少空响应校验 | `run()` 与 `stream()` 一致：空 / 全空白响应抛 `SummaryAgentError`。新测试 `test_run_rejects_empty_provider_response` 守门 |
+| 10.2(2) | `stream_iter` 丢弃 `truncated` 标记 | 新增 `prepare_stream(request) -> (StreamMeta, iterator)`，`StreamMeta` 携带 `model_id` / `template_fingerprint` / `truncated`；`stream_iter` 保留为兼容层 |
+| 10.2(3) | Worker 重复拼装 `model_id`、访问 `_provider` 私有属性 | `SummaryAgent.build_model_id()` 公开，`SummaryWorker` 改走 `prepare_stream` 直接拿到 `meta.model_id` |
+| 10.2(4) | `model` 属性是隐式契约 | `LLMProvider` Protocol 显式声明 `model: str`；`SummaryAgent.provider_model` 直接读取，去掉 "unknown" 默默回退 |
+| 10.2(5) | `_cancel_requested` 是裸 `bool` | 改为 `threading.Event`，`SummaryWorker` 与 `BatchSummaryWorker` 都换上 |
+| 10.2(6) | `detail_level` 校验延迟到 `_render` | `SummaryRequest.__post_init__` 在构造时即校验 `detail_level` 与 `max_content_chars`，fail-fast |
+| 10.3 | `run()` 路径无 `ProviderError` 测试 | 新增 `test_provider_error_propagates_in_run` |
+| 10.3 | `truncate_content` 无独立测试 | 已存在 `tests/test_summary_truncation.py`（Phase 2 加），覆盖 0 / 负 / 正常 / 极长四种边界 |
+| 10.3 | `SummaryWorker` 无测试 | 新增 `tests/test_summary_worker.py` —— started/token/finished 顺序、节流、`truncated` 透传、`ProviderError` → failed、cancel → cancelled、空响应 → failed |
+| 10.3 | `BatchSummaryWorker` 无测试 | 已存在 `tests/test_batch_summary.py`（Phase 2 加） |
+| 10.3 | `build_summary_result` 无 `@` 边界测试 | 现行为：缺 `@` 时 `template_fingerprint` 为空（不再继承全串）；新增三个 case |
+| 10.4 | Agent 层无空内容拦截 | 由 `SummaryRequest.__post_init__` 之外的入口仍可空内容；当前由 Agent 在 `run()` / `stream()` 完成后判空。批量入口的前置拦截保留 |
+
+GUI 层一并跟进：`SummaryWorker.finished` 现在多带 `truncated: bool`，`mercury.gui._on_summary_finished` 接收并把状态条前缀 `[已裁剪]` 显示给用户。
+
+回归测试：127 全过（Phase 3 重构后基线 112 + 本轮 9 新增 worker 单测 + 6 新增 agent / prepare_stream 测试）。

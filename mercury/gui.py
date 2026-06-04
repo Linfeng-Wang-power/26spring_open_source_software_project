@@ -2377,9 +2377,14 @@ class MercuryMainWindow(QMainWindow):
             self.summary_text.setText(f"生成中… {len(self.summary_buffer)} 字")
             self._render_summary_panel(self.summary_buffer)
 
-    @Slot(int, str, str, str)
+    @Slot(int, str, str, str, bool)
     def _on_summary_finished(
-        self, job_id: int, entry_id: str, full_text: str, model_id: str
+        self,
+        job_id: int,
+        entry_id: str,
+        full_text: str,
+        model_id: str,
+        truncated: bool,
     ) -> None:
         if not self._is_active_summary_job(job_id, entry_id):
             return
@@ -2390,7 +2395,10 @@ class MercuryMainWindow(QMainWindow):
             except Exception as exc:
                 self._show_error_dialog("摘要保存失败", str(exc))
         if self._is_current_entry(entry_id):
-            self.summary_text.setText(self._summary_status_preview(full_text))
+            preview = self._summary_status_preview(full_text)
+            if truncated:
+                preview = "[已裁剪] " + preview
+            self.summary_text.setText(preview)
             self._render_summary_panel(full_text)
             self._auto_expand_summary_panel()
 

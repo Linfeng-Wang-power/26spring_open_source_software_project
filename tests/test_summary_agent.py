@@ -91,14 +91,19 @@ def test_stream_empty_response_raises(request_obj: SummaryRequest) -> None:
         agent.stream(request_obj)
 
 
-def test_invalid_detail_level_raises() -> None:
-    provider = FakeProvider(complete_text="x")
-    agent = SummaryAgent(provider)
-    bad = SummaryRequest(
-        entry_id="e1", title="t", content="c", detail_level="medium"
-    )
+def test_invalid_detail_level_raises_on_construction() -> None:
+    """detail_level is validated in SummaryRequest.__post_init__."""
     with pytest.raises(SummaryAgentError):
-        agent.run(bad)
+        SummaryRequest(
+            entry_id="e1", title="t", content="c", detail_level="medium"
+        )
+
+
+def test_negative_max_content_chars_raises_on_construction() -> None:
+    with pytest.raises(SummaryAgentError):
+        SummaryRequest(
+            entry_id="e1", title="t", content="c", max_content_chars=-1
+        )
 
 
 def test_provider_error_propagates(request_obj: SummaryRequest) -> None:
@@ -106,6 +111,54 @@ def test_provider_error_propagates(request_obj: SummaryRequest) -> None:
     agent = SummaryAgent(provider)
     with pytest.raises(ProviderHTTPError):
         agent.stream(request_obj)
+
+
+def test_provider_error_propagates_in_run(request_obj: SummaryRequest) -> None:
+    """Code-review §10.3: run() must surface ProviderError just like stream()."""
+    provider = FakeProvider(raise_on="complete")
+    agent = SummaryAgent(provider)
+    with pytest.raises(ProviderHTTPError):
+        agent.run(request_obj)
+
+
+def test_run_rejects_empty_provider_response(request_obj: SummaryRequest) -> None:
+    """Code-review §10.2(1): empty completion text is invalid."""
+    provider = FakeProvider(complete_text="   ")
+    agent = SummaryAgent(provider)
+    with pytest.raises(SummaryAgentError):
+        agent.run(request_obj)
+
+
+def test_prepare_stream_returns_metadata(request_obj: SummaryRequest) -> None:
+    """Code-review §10.2(2): meta carries model_id, fingerprint, truncated."""
+    provider = FakeProvider(stream_chunks=["a", "b"])
+    agent = SummaryAgent(provider)
+    meta, deltas = agent.prepare_stream(request_obj)
+    assert meta.model_id.startswith("fake-1@")
+    assert meta.template_fingerprint
+    assert meta.truncated is False
+    assert list(deltas) == ["a", "b"]
+
+
+def test_prepare_stream_marks_truncated_for_long_content() -> None:
+    provider = FakeProvider(stream_chunks=["x"])
+    agent = SummaryAgent(provider)
+    req = SummaryRequest(
+        entry_id="e1",
+        title="big",
+        content="A" * 50000,
+        max_content_chars=2000,
+    )
+    meta, _deltas = agent.prepare_stream(req)
+    assert meta.truncated is True
+
+
+def test_build_model_id_combines_provider_model_and_template_fingerprint() -> None:
+    provider = FakeProvider()
+    agent = SummaryAgent(provider)
+    tag = agent.build_model_id()
+    assert tag.startswith("fake-1@")
+    assert tag.endswith(agent.template.fingerprint)
 
 
 def test_stream_iter_yields_raw_deltas(request_obj: SummaryRequest) -> None:

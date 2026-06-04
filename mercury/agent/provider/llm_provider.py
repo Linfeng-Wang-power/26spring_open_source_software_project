@@ -54,7 +54,14 @@ class ChatMessage:
 
 
 class LLMProvider(Protocol):
-    """Provider-neutral chat-completions surface."""
+    """Provider-neutral chat-completions surface.
+
+    Implementations must expose a ``model`` attribute identifying the
+    backing model. Agents tag persisted results with this string, so a
+    silent ``"unknown"`` fallback would corrupt model bookkeeping.
+    """
+
+    model: str
 
     def complete(self, messages: Iterable[ChatMessage]) -> str:
         """Return the full assistant text in one call."""

@@ -7,6 +7,7 @@ quickly without UI thrash. Each entry's outcome is emitted on the
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -61,11 +62,11 @@ class BatchSummaryWorker(QObject):
         super().__init__()
         self._agent = agent
         self._items = items
-        self._cancel = False
+        self._cancel = threading.Event()
 
     @Slot()
     def request_cancel(self) -> None:
-        self._cancel = True
+        self._cancel.set()
 
     @Slot()
     def run(self) -> None:
@@ -74,7 +75,7 @@ class BatchSummaryWorker(QObject):
         skipped = 0
         total = len(self._items)
         for idx, item in enumerate(self._items, start=1):
-            if self._cancel:
+            if self._cancel.is_set():
                 # Remaining items count as skipped so the totals line up.
                 skipped += total - (idx - 1)
                 self.cancelled.emit(success, fail, skipped)
