@@ -7,8 +7,8 @@ from typing import Callable
 import httpx
 import pytest
 
-import mercury_feed
-from mercury_feed import (
+import mercury.feed as mercury_feed
+from mercury.feed import (
     FeedParseError,
     FeedSubscription,
     LocalFeedService,

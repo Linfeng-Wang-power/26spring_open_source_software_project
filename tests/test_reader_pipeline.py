@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import httpx
 
-from reader.fetcher import SourceHtmlFetcher
-from reader.markdown_converter import html_to_markdown
-from reader.pipeline import ReaderPipelineService
-from reader.sanitizer import clean_reader_html
+from mercury.reader.fetcher import SourceHtmlFetcher
+from mercury.reader.markdown_converter import html_to_markdown
+from mercury.reader.pipeline import ReaderPipelineService
+from mercury.reader.sanitizer import clean_reader_html
 
 
 ARTICLE_HTML = """

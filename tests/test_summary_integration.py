@@ -12,17 +12,17 @@ from typing import Iterable, Iterator
 import pytest
 
 # ── Agent layer ──────────────────────────────────────────────────────────────
-from agent.provider.llm_provider import ChatMessage, LLMProvider
-from agent.prompts.template_renderer import load_template, render_template
-from agent.summary.summary_agent import (
+from mercury.agent.provider.llm_provider import ChatMessage, LLMProvider
+from mercury.agent.prompts.template_renderer import load_template, render_template
+from mercury.agent.summary.summary_agent import (
     SummaryAgent,
     SummaryAgentError,
     SummaryRequest,
 )
-from agent.summary.summary_worker import SummaryJob, SummaryWorker
+from mercury.agent.summary.summary_worker import SummaryJob, SummaryWorker
 
 # ── Storage layer ────────────────────────────────────────────────────────────
-from mercury_storage import SummaryStore, apply_migrations, get_connection
+from mercury.storage import SummaryStore, apply_migrations, get_connection
 
 # ── PySide6 (Qt) ────────────────────────────────────────────────────────────
 from PySide6.QtCore import QThread, QObject, Signal

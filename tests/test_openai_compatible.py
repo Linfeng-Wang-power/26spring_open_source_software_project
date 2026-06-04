@@ -9,14 +9,14 @@ import httpx
 import pytest
 import respx
 
-from agent.provider.llm_provider import (
+from mercury.agent.provider.llm_provider import (
     ChatMessage,
     ProviderAuthError,
     ProviderConfig,
     ProviderHTTPError,
     ProviderTimeoutError,
 )
-from agent.provider.openai_compatible import OpenAICompatibleProvider
+from mercury.agent.provider.openai_compatible import OpenAICompatibleProvider
 
 
 def _config(base_url: str = "https://api.example.com") -> ProviderConfig:

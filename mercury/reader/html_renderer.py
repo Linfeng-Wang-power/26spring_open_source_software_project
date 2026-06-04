@@ -6,7 +6,7 @@ from html import escape
 
 from markdown_it import MarkdownIt
 
-from reader.sanitizer import sanitize_html
+from mercury.reader.sanitizer import sanitize_html
 
 
 CLEANED_READER_CSS = """

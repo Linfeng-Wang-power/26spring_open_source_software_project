@@ -11,8 +11,8 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from agent.provider.llm_provider import ProviderError
-from agent.summary.summary_agent import (
+from mercury.agent.provider.llm_provider import ProviderError
+from mercury.agent.summary.summary_agent import (
     SummaryAgent,
     SummaryAgentError,
     SummaryRequest,

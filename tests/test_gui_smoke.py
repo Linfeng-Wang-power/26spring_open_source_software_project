@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QListWidget, QMainWindow, QSplitter, QTextBrowser, QToolBar, QWidget
 
-from mercury_gui import Article, Feed, MercuryMainWindow
+from mercury.gui import Article, Feed, MercuryMainWindow
 
 
 class StubFeedService:

@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
-from agent.provider.llm_provider import ChatMessage, LLMProvider, ProviderError
-from agent.prompts.template_renderer import (
+from mercury.agent.provider.llm_provider import ChatMessage, LLMProvider, ProviderError
+from mercury.agent.prompts.template_renderer import (
     PromptTemplate,
     RenderedPrompt,
     load_template,

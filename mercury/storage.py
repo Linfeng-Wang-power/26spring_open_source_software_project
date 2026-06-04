@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 from yoyo import get_backend, read_migrations
 
-from mercury_feed import (
+from mercury.feed import (
     Article,
     Feed,
     FeedParseError,
@@ -32,7 +32,7 @@ from mercury_feed import (
     parse_feed_xml,
     parse_opml,
 )
-from reader.models import ReaderDocument
+from mercury.reader.models import ReaderDocument
 
 # ---------------------------------------------------------------------------
 # Paths

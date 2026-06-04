@@ -1,4 +1,4 @@
-from agent.provider.llm_provider import (
+from mercury.agent.provider.llm_provider import (
     LLMProvider,
     ProviderConfig,
     ProviderError,
@@ -6,8 +6,8 @@ from agent.provider.llm_provider import (
     ProviderAuthError,
     ProviderHTTPError,
 )
-from agent.provider.openai_compatible import OpenAICompatibleProvider
-from agent.provider.keys import resolve_api_key
+from mercury.agent.provider.openai_compatible import OpenAICompatibleProvider
+from mercury.agent.provider.keys import resolve_api_key
 
 __all__ = [
     "LLMProvider",

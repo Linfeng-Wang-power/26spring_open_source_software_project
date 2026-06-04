@@ -49,9 +49,9 @@ except ModuleNotFoundError as exc:
     print("PySide6 未安装。请先运行：pip install PySide6")
     raise SystemExit(1) from exc
 
-from mercury_storage import StorageService
-from reader import ReaderPipelineService
-from reader.models import ReaderDocument
+from mercury.storage import StorageService
+from mercury.reader import ReaderPipelineService
+from mercury.reader.models import ReaderDocument
 
 
 # -----------------------------

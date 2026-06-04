@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.prompts.template_renderer import (
+from mercury.agent.prompts.template_renderer import (
     PromptError,
     load_template,
     render_template,

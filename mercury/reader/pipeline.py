@@ -7,12 +7,12 @@ from typing import Any
 
 import httpx
 
-from reader.fetcher import SourceHtmlFetcher
-from reader.html_renderer import render_markdown_to_reader_html
-from reader.markdown_converter import html_to_markdown
-from reader.models import FetchResult, ReaderDocument
-from reader.readability import extract_readable_html
-from reader.sanitizer import clean_reader_html
+from mercury.reader.fetcher import SourceHtmlFetcher
+from mercury.reader.html_renderer import render_markdown_to_reader_html
+from mercury.reader.markdown_converter import html_to_markdown
+from mercury.reader.models import FetchResult, ReaderDocument
+from mercury.reader.readability import extract_readable_html
+from mercury.reader.sanitizer import clean_reader_html
 
 
 @dataclass(frozen=True)

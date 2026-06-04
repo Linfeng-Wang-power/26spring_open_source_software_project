@@ -1,4 +1,4 @@
-from agent.prompts.template_renderer import (
+from mercury.agent.prompts.template_renderer import (
     PromptTemplate,
     PromptMessage,
     RenderedPrompt,

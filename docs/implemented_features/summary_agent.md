@@ -107,7 +107,7 @@ pytest tests/test_gui_smoke.py
 - [x] Phase 2：超长内容裁剪（`max_content_chars` 默认 12000，60/40 头尾切片 + 省略提示）
 - [x] Phase 2：targetLanguage 切换器（SummaryBar 下拉，持久化到 `summary.target_lang`）
 - [x] Phase 2：批量摘要（多选 + 串行 worker + 进度对话框 + 失败聚合）
-- [ ] Phase 3：迁移到 Mercury 仓库目标布局（`mercury/agent/...`）— 跨切片重构，建议独立 PR
+- [x] Phase 3：迁移到 `mercury/` 包布局（`mercury.agent.*` / `mercury.reader.*` / `mercury.gui` / `mercury.storage` / `mercury.feed`），入口改为 `python -m mercury` 或 `run_lumen.py`
 
 ## 8. 已知限制
 

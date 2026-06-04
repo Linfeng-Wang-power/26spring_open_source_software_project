@@ -19,10 +19,10 @@ import os
 from dataclasses import dataclass
 from typing import Protocol
 
-from agent.provider.keys import resolve_api_key
-from agent.provider.llm_provider import ProviderConfig
-from agent.provider.openai_compatible import OpenAICompatibleProvider
-from agent.summary.summary_agent import SummaryAgent
+from mercury.agent.provider.keys import resolve_api_key
+from mercury.agent.provider.llm_provider import ProviderConfig
+from mercury.agent.provider.openai_compatible import OpenAICompatibleProvider
+from mercury.agent.summary.summary_agent import SummaryAgent
 
 
 class _SettingsLike(Protocol):

@@ -6,17 +6,17 @@ from typing import Iterable, Iterator
 
 import pytest
 
-from agent.provider.llm_provider import (
+from mercury.agent.provider.llm_provider import (
     ChatMessage,
     LLMProvider,
     ProviderHTTPError,
 )
-from agent.summary.batch_worker import (
+from mercury.agent.summary.batch_worker import (
     BatchSummaryItem,
     BatchSummaryOutcome,
     BatchSummaryWorker,
 )
-from agent.summary.summary_agent import SummaryAgent, SummaryRequest
+from mercury.agent.summary.summary_agent import SummaryAgent, SummaryRequest
 
 
 class ScriptedProvider(LLMProvider):

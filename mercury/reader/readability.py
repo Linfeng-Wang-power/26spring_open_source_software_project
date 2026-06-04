@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from readability import Document
 
-from reader.models import ReadabilityResult
+from mercury.reader.models import ReadabilityResult
 
 
 def extract_readable_html(source_html: str) -> ReadabilityResult:

@@ -6,12 +6,12 @@ from typing import Iterable, Iterator
 
 import pytest
 
-from agent.provider.llm_provider import (
+from mercury.agent.provider.llm_provider import (
     ChatMessage,
     LLMProvider,
     ProviderHTTPError,
 )
-from agent.summary.summary_agent import (
+from mercury.agent.summary.summary_agent import (
     SummaryAgent,
     SummaryAgentError,
     SummaryRequest,

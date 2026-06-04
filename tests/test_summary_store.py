@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mercury_storage import SummaryStore, apply_migrations, get_connection
+from mercury.storage import SummaryStore, apply_migrations, get_connection
 
 
 @pytest.fixture()

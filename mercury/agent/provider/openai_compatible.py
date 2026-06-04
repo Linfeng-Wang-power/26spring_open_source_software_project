@@ -14,7 +14,7 @@ from typing import Iterable, Iterator
 
 import httpx
 
-from agent.provider.llm_provider import (
+from mercury.agent.provider.llm_provider import (
     ChatMessage,
     LLMProvider,
     ProviderAuthError,
