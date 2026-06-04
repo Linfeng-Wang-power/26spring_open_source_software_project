@@ -258,7 +258,7 @@ class EntryStore:
             f"""SELECT entry_id, feed_id, stable_id, title, author, url,
                        published, summary, is_starred, is_unread
                 FROM entries {where}
-                ORDER BY published DESC""",
+                ORDER BY published DESC, entry_id""",
             params,
         ).fetchall()
         return [EntryRow(**dict(row)) for row in rows]
@@ -321,7 +321,7 @@ class EntryStore:
                 FROM entries
                 JOIN tags ON tags.entry_id = entries.entry_id
                 WHERE {' AND '.join(clauses)}
-                ORDER BY entries.published DESC""",
+                ORDER BY entries.published DESC, entries.entry_id""",
             params,
         ).fetchall()
         return [EntryRow(**dict(row)) for row in rows]
