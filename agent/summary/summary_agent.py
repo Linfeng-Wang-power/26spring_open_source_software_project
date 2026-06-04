@@ -19,6 +19,9 @@ from agent.prompts.template_renderer import (
 
 DETAIL_LEVELS = ("short", "default", "detailed")
 
+DEFAULT_MAX_CONTENT_CHARS = 12000
+TRUNCATION_NOTICE = "\n\n[…内容因长度限制已裁剪…]\n\n"
+
 
 class SummaryAgentError(Exception):
     """Raised when the summary flow fails in a non-provider way."""
@@ -33,6 +36,7 @@ class SummaryRequest:
     content: str
     target_language: str = "zh-CN"
     detail_level: str = "default"
+    max_content_chars: int = DEFAULT_MAX_CONTENT_CHARS
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,29 @@ class SummaryResult:
     text: str
     model_id: str
     template_fingerprint: str
+    truncated: bool = False
+
+
+def truncate_content(text: str, max_chars: int) -> tuple[str, bool]:
+    """Trim *text* to roughly *max_chars*, preserving head and tail.
+
+    Returns ``(possibly_trimmed, truncated_flag)``. When ``max_chars`` is
+    non-positive, no trimming happens. When the text already fits, it is
+    returned unchanged.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text, False
+    # Keep ~60% of the budget at the head, ~40% at the tail. Headlines and
+    # the lead paragraph carry the most signal; the closing paragraph often
+    # has a conclusion. We splice the truncation notice between them so the
+    # model knows what happened.
+    notice_len = len(TRUNCATION_NOTICE)
+    body_budget = max(0, max_chars - notice_len)
+    head_len = int(body_budget * 0.6)
+    tail_len = body_budget - head_len
+    head = text[:head_len].rstrip()
+    tail = text[-tail_len:].lstrip() if tail_len > 0 else ""
+    return f"{head}{TRUNCATION_NOTICE}{tail}", True
 
 
 class SummaryAgent:
@@ -72,7 +99,7 @@ class SummaryAgent:
 
     def run(self, request: SummaryRequest) -> SummaryResult:
         """Non-streaming: call provider.complete(), return full result."""
-        rendered = self._render(request)
+        rendered, truncated = self._render(request)
         messages = [ChatMessage(role=m.role, content=m.content) for m in rendered.messages]
         try:
             text = self._provider.complete(messages)
@@ -86,6 +113,7 @@ class SummaryAgent:
             text=text.strip(),
             model_id=self._model_tag(rendered),
             template_fingerprint=rendered.template_fingerprint,
+            truncated=truncated,
         )
 
     def stream(
@@ -99,7 +127,7 @@ class SummaryAgent:
         If *on_token* is provided, each delta is passed to the callback (useful
         for Qt worker signal throttling). Returns the assembled result.
         """
-        rendered = self._render(request)
+        rendered, truncated = self._render(request)
         messages = [ChatMessage(role=m.role, content=m.content) for m in rendered.messages]
 
         accumulated: list[str] = []
@@ -122,29 +150,31 @@ class SummaryAgent:
             text=full_text,
             model_id=self._model_tag(rendered),
             template_fingerprint=rendered.template_fingerprint,
+            truncated=truncated,
         )
 
     def stream_iter(self, request: SummaryRequest) -> Iterator[str]:
         """Low-level iterator variant for callers who want raw deltas."""
-        rendered = self._render(request)
+        rendered, _ = self._render(request)
         messages = [ChatMessage(role=m.role, content=m.content) for m in rendered.messages]
         yield from self._provider.stream(messages)
 
     # -- Internal -------------------------------------------------------------
 
-    def _render(self, request: SummaryRequest) -> RenderedPrompt:
+    def _render(self, request: SummaryRequest) -> tuple[RenderedPrompt, bool]:
         if request.detail_level not in DETAIL_LEVELS:
             raise SummaryAgentError(
                 f"Invalid detail_level: {request.detail_level!r}; "
                 f"expected one of {DETAIL_LEVELS}"
             )
+        content, truncated = truncate_content(request.content, request.max_content_chars)
         variables = {
             "target_language": request.target_language,
             "detail_level": request.detail_level,
             "title": request.title,
-            "content": request.content,
+            "content": content,
         }
-        return render_template(self._template, variables)
+        return render_template(self._template, variables), truncated
 
     def _model_tag(self, rendered: RenderedPrompt) -> str:
         model = getattr(self._provider, "model", "unknown")

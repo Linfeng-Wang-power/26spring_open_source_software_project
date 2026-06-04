@@ -4,6 +4,8 @@ from agent.summary.summary_agent import (
     SummaryResult,
     SummaryAgentError,
     DETAIL_LEVELS,
+    DEFAULT_MAX_CONTENT_CHARS,
+    truncate_content,
 )
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "SummaryResult",
     "SummaryAgentError",
     "DETAIL_LEVELS",
+    "DEFAULT_MAX_CONTENT_CHARS",
+    "truncate_content",
 ]
