@@ -646,6 +646,7 @@ class SummarySettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("摘要 Provider 设置")
         self.setMinimumWidth(420)
+        self.setModal(True)
         self._settings = settings_store
 
         from mercury.agent.provider.keys import resolve_api_key
@@ -679,10 +680,18 @@ class SummarySettingsDialog(QDialog):
         self.status_label.setStyleSheet("color: #888888;")
 
         self.test_button = QPushButton("测试连接")
+        self.test_button.setAutoDefault(False)
+        self.test_button.setDefault(False)
         self.test_button.clicked.connect(self._on_test_connection)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.addButton(self.test_button, QDialogButtonBox.ActionRole)
+        # Stop Save / Cancel from auto-stealing Enter while the user is in a
+        # text field; otherwise typing into Base URL on macOS feels like the
+        # focus is "elsewhere" because the default button keeps lighting up.
+        for btn in buttons.buttons():
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
@@ -690,6 +699,9 @@ class SummarySettingsDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(self.status_label)
         layout.addWidget(buttons)
+
+        # Land the cursor in the first input so the dialog is immediately typable.
+        self.base_url_edit.setFocus()
 
     def _on_test_connection(self) -> None:
         """Send a minimal chat-completions probe so the user knows whether
