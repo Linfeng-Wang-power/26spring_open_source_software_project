@@ -1,6 +1,6 @@
 # Summary Agent 实现说明
 
-> 分支：`summary-agent` · 负责人：陆骏凯 · 状态：MVP 完成（端到端可跑通）
+> 分支：`summary-agent` · 负责人：陆骏凯 · 状态：MVP 完成（端到端可跑通），LLM：Claude-Opus-4-7、Qwen3.7-Max，harness：Claude Code，QorderWork
 
 ## 1. 功能概览
 
@@ -126,7 +126,7 @@ pytest tests/test_gui_smoke.py
 - `TranslationAgent`（张睿桐）：可直接复用 `mercury.agent.provider`、`mercury.agent.prompts`、`SummaryWorker` 节流模式。
 - `AgentRuntime`（共享 task queue）：当前 worker 直接挂在 `MainWindow`，未来抽到 `mercury.core.tasking` 后只需替换工厂。
 
-## 10. Code Review（2026-06-04）
+## 10. Code Review（2026-06-04，Qwen3.7-Max）
 
 > 审查范围：`summary_agent.py`、`summary_worker.py`、`batch_worker.py`、`runtime_config.py`、`test_summary_agent.py`、`summary.default.yaml`
 >
@@ -190,7 +190,7 @@ model_id = f"{getattr(self._agent._provider, 'model', 'unknown')}@{self._agent.t
 
 Summary Agent 的整体实现质量不错，架构分层合理，核心抽象（`LLMProvider` Protocol、`PromptTemplate`、`SummaryRequest/Result`）设计干净，具备良好的可测试性和可扩展性。主要改进方向集中在：补齐 `run()` 与 `stream()` 在空响应校验上的一致性、解决 `stream_iter` 路径丢失 `truncated` 标记和 `model_id` 重复拼装的问题、将 `model` 属性纳入 Provider 契约、以及补充 `truncate_content` 和 Worker 层的测试覆盖。这些问题大多不影响当前 MVP 的正确性，但在进入生产阶段前建议逐一处理。
 
-### 10.6 修复跟进（2026-06-04 当日）
+### 10.6 修复跟进（2026-06-04 当日，Claude-Opus-4-7）
 
 逐条对照 §10.2 / §10.3 的发现已落地：
 
@@ -212,3 +212,17 @@ Summary Agent 的整体实现质量不错，架构分层合理，核心抽象（
 GUI 层一并跟进：`SummaryWorker.finished` 现在多带 `truncated: bool`，`mercury.gui._on_summary_finished` 接收并把状态条前缀 `[已裁剪]` 显示给用户。
 
 回归测试：127 全过（Phase 3 重构后基线 112 + 本轮 9 新增 worker 单测 + 6 新增 agent / prepare_stream 测试）。
+
+### 10.7 修复总结（2026-06-04）
+
+本轮修复针对 §10.2–§10.4 提出的 11 项发现逐一落地，核心变更可归纳为三条主线：
+
+**契约显式化。** `LLMProvider` Protocol 新增 `model: str` 声明，消除了 `_model_tag` 对鸭子类型的隐式依赖；`SummaryAgent.build_model_id()` 从私有方法 `_model_tag` 提升为公开接口，Worker 层不再需要访问 `_provider` 私有属性或重复拼装 `model@fingerprint` 格式串。`SummaryRequest.__post_init__` 将 `detail_level` 和 `max_content_chars` 的校验前移到构造阶段，使无效请求在诞生时即 fail-fast，而非延迟到网络调用前才暴露。
+
+**流式元数据通路。** 新增 `StreamMeta` 数据类和 `prepare_stream()` 方法，在流式迭代开始前即可获取 `model_id`、`template_fingerprint`、`truncated` 三项元数据。这同时解决了两个问题：`stream_iter` 路径不再丢失裁剪标记，Worker 层也不再需要自行推导 model_id。`SummaryWorker.finished` 信号相应扩展为 5 参数，将 `truncated` 标记透传到 GUI 层展示。
+
+**防御一致性。** `run()` 补齐了空响应校验，与 `stream()` 行为对齐；`_cancel_requested` 从裸 `bool` 改为 `threading.Event`，为未来可能的 free-threaded Python 或 asyncio 迁移消除了一个跨线程隐患。
+
+测试侧新增 15 个用例（`test_summary_agent.py` +6、`test_summary_worker.py` +9），覆盖了 `run()` 空响应、`run()` ProviderError 透传、`prepare_stream` 元数据、Worker 信号顺序/节流/取消/失败、以及 `build_summary_result` 的 `@` 边界情况。回归基线从 112 提升至 127，全部通过。
+
+遗留一点：`test_summary_worker.py` 中 `seen: dict = {}` 缺少泛型标注（应为 `dict[str, Any]`），在 mypy 严格模式下会报 warning，属于风格层面的小瑕疵，不影响正确性。
