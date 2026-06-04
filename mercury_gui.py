@@ -884,6 +884,8 @@ class MercuryMainWindow(QMainWindow):
         self.summary_target_lang = ""  # "" means follow UI language
         self.batch_summary_thread: QThread | None = None
         self.batch_summary_worker = None
+        self._batch_dialog = None
+        self._batch_outcome_index = 0
         self.unread_filter_enabled = False
         self.last_refresh_status = "尚未刷新"
         self.sidebar_collapsed = False
@@ -2479,30 +2481,15 @@ class MercuryMainWindow(QMainWindow):
         worker.moveToThread(thread)
         dialog.set_cancel_callback(worker.request_cancel)
 
-        worker.progress.connect(dialog.update_progress)
+        # Stash the dialog and a per-item index counter on self so the slot
+        # method (which runs on the GUI thread) can access them.
+        self._batch_dialog = dialog
+        self._batch_outcome_index = 0
 
-        # Track outcome index against the dialog list ordering.
-        index_holder = {"i": 0}
-
-        def on_item_done(outcome) -> None:
-            idx = index_holder["i"]
-            index_holder["i"] += 1
-            detail = ""
-            if outcome.skipped:
-                detail = outcome.error or "已跳过"
-            elif not outcome.ok:
-                detail = (outcome.error or "失败")[:120]
-            dialog.update_outcome(idx, outcome.ok, outcome.title, detail)
-            if outcome.ok and store is not None and outcome.entry_id:
-                try:
-                    store.save_result(outcome.entry_id, outcome.text, outcome.model_id)
-                except Exception:
-                    # Persistence failure is non-fatal for the batch run.
-                    pass
-
-        worker.item_done.connect(on_item_done)
-        worker.finished.connect(dialog.mark_finished)
-        worker.cancelled.connect(dialog.mark_finished)
+        worker.progress.connect(dialog.update_progress, Qt.QueuedConnection)
+        worker.item_done.connect(self._on_batch_item_done, Qt.QueuedConnection)
+        worker.finished.connect(dialog.mark_finished, Qt.QueuedConnection)
+        worker.cancelled.connect(dialog.mark_finished, Qt.QueuedConnection)
         worker.finished.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
         thread.finished.connect(self._clear_batch_summary_worker)
@@ -2538,10 +2525,47 @@ class MercuryMainWindow(QMainWindow):
             articles.append(self.current_article)
         return articles
 
+    @Slot(object)
+    def _on_batch_item_done(self, outcome) -> None:
+        """Handle a single batch outcome on the GUI thread.
+
+        Persisting summaries here (instead of in the worker thread) means we
+        reuse the main SQLite connection without violating sqlite3's
+        single-thread guarantee. Errors are surfaced to the dialog row instead
+        of being silently swallowed so the user can see when persistence fails.
+        """
+        dialog = getattr(self, "_batch_dialog", None)
+        idx = self._batch_outcome_index
+        self._batch_outcome_index += 1
+
+        detail = ""
+        if outcome.skipped:
+            detail = outcome.error or "已跳过"
+        elif not outcome.ok:
+            detail = (outcome.error or "失败")[:120]
+
+        if outcome.ok and outcome.entry_id and outcome.text:
+            store = self._summary_store()
+            if store is not None:
+                try:
+                    store.save_result(
+                        outcome.entry_id, outcome.text, outcome.model_id
+                    )
+                except Exception as exc:
+                    detail = f"保存失败: {exc}"
+            # If the saved entry is the one currently open, refresh the panel.
+            if self._is_current_entry(outcome.entry_id):
+                self._restore_summary_for_article(self.current_article)
+
+        if dialog is not None:
+            dialog.update_outcome(idx, outcome.ok, outcome.title, detail)
+
     @Slot()
     def _clear_batch_summary_worker(self) -> None:
         self.batch_summary_thread = None
         self.batch_summary_worker = None
+        self._batch_dialog = None
+        self._batch_outcome_index = 0
 
     def on_translate(self) -> None:
         if not self.current_article:
