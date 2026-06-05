@@ -5,7 +5,7 @@ from __future__ import annotations
 from bs4 import BeautifulSoup
 from readability import Document
 
-from reader.models import ReadabilityResult
+from mercury.reader.models import ReadabilityResult
 
 NO_TITLE = "[no-title]"
 

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mercury_gui import Article, Feed, MercuryMainWindow
+from mercury.gui import Article, Feed, MercuryMainWindow
 
 
 class StubFeedService:

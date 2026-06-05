@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 from yoyo import get_backend, read_migrations
 
-from mercury_feed import (
+from mercury.feed import (
     Article,
     Feed,
     FeedParseError,
@@ -32,7 +32,7 @@ from mercury_feed import (
     parse_feed_xml,
     parse_opml,
 )
-from reader.models import ReaderDocument
+from mercury.reader.models import ReaderDocument
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -258,7 +258,7 @@ class EntryStore:
             f"""SELECT entry_id, feed_id, stable_id, title, author, url,
                        published, summary, is_starred, is_unread
                 FROM entries {where}
-                ORDER BY published DESC""",
+                ORDER BY published DESC, entry_id""",
             params,
         ).fetchall()
         return [EntryRow(**dict(row)) for row in rows]
@@ -321,7 +321,7 @@ class EntryStore:
                 FROM entries
                 JOIN tags ON tags.entry_id = entries.entry_id
                 WHERE {' AND '.join(clauses)}
-                ORDER BY entries.published DESC""",
+                ORDER BY entries.published DESC, entries.entry_id""",
             params,
         ).fetchall()
         return [EntryRow(**dict(row)) for row in rows]
@@ -401,19 +401,68 @@ class ContentStore:
 class SummaryStore:
     """Storage interface for Summary Agent results.
 
-    Schema is live (migration 0003).  Implementation to be filled in by 陆骏凯.
+    Backed by the ``summary_results`` table (migration 0003). Failures must NOT
+    overwrite an existing successful result, so ``save_result`` rejects empty
+    summary text.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def save_result(self, entry_id: str, summary_text: str, model_id: str = "") -> None:
-        """Persist a successful summary result; overwrites any previous result."""
-        raise NotImplementedError
+        """Persist a successful summary result; overwrites any previous result.
+
+        Empty *summary_text* is rejected so a cancelled or failed run cannot
+        wipe an earlier success.
+        """
+        if not summary_text or not summary_text.strip():
+            raise ValueError("summary_text must not be empty")
+        if not entry_id:
+            raise ValueError("entry_id must not be empty")
+        self._conn.execute(
+            """INSERT OR REPLACE INTO summary_results
+               (entry_id, summary_text, model_id, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (entry_id, summary_text, model_id, _now()),
+        )
+        self._conn.commit()
 
     def get(self, entry_id: str) -> str | None:
         """Return the cached summary text, or None if not yet generated."""
-        raise NotImplementedError
+        if not entry_id:
+            return None
+        row = self._conn.execute(
+            "SELECT summary_text FROM summary_results WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        text = row["summary_text"]
+        return text or None
+
+    def get_metadata(self, entry_id: str) -> dict | None:
+        """Return ``{summary_text, model_id, created_at}`` or None."""
+        if not entry_id:
+            return None
+        row = self._conn.execute(
+            """SELECT summary_text, model_id, created_at
+               FROM summary_results WHERE entry_id = ?""",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "summary_text": row["summary_text"],
+            "model_id": row["model_id"],
+            "created_at": row["created_at"],
+        }
+
+    def delete(self, entry_id: str) -> None:
+        """Remove a stored summary (used for manual clear)."""
+        self._conn.execute(
+            "DELETE FROM summary_results WHERE entry_id = ?", (entry_id,)
+        )
+        self._conn.commit()
 
 
 class TranslationStore:
