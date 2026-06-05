@@ -6,13 +6,23 @@ import os
 # while the module is imported, not inside the test function.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QListWidget, QMainWindow, QSplitter, QTextBrowser, QToolBar, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QListWidget,
+    QMainWindow,
+    QMessageBox,
+    QSplitter,
+    QTextBrowser,
+    QToolBar,
+    QWidget,
+)
 
 from mercury.gui import Article, Feed, MercuryMainWindow
 
 
 class StubFeedService:
     def __init__(self) -> None:
+        self.deleted_feed_batches: list[list[str]] = []
         self.feeds = [
             Feed("All Feeds", "internal://all", 2),
             Feed("Starred", "internal://starred", 1),
@@ -78,6 +88,10 @@ class StubFeedService:
 
     def refresh_all(self) -> None:
         raise AssertionError("unexpected refresh_all call")
+
+    def delete_feeds(self, feed_titles: list[str]) -> None:
+        self.deleted_feed_batches.append(list(feed_titles))
+        self.feeds = [feed for feed in self.feeds if feed.title not in feed_titles]
 
 
 class StubReaderPipeline:
@@ -166,3 +180,56 @@ def test_main_window_search_filters_visible_article_rows(qtbot) -> None:
 
     assert not article_list.item(0).isHidden()
     assert not article_list.item(1).isHidden()
+
+
+def test_feed_checkboxes_only_show_in_batch_selection_mode(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+
+    engineering_item = window.feed_list.item(2)
+    assert not engineering_item.flags() & Qt.ItemIsUserCheckable
+    assert window.batch_delete_feed_action.text() == "批量选择"
+
+    window.on_batch_delete_feeds()
+
+    engineering_item = window.feed_list.item(2)
+    assert engineering_item.flags() & Qt.ItemIsUserCheckable
+    assert window.batch_delete_feed_action.text() == "删除已选"
+    assert window.cancel_batch_delete_feed_action.isVisible()
+
+    window.on_cancel_batch_delete_feeds()
+
+    engineering_item = window.feed_list.item(2)
+    assert not engineering_item.flags() & Qt.ItemIsUserCheckable
+    assert window.batch_delete_feed_action.text() == "批量选择"
+    assert not window.cancel_batch_delete_feed_action.isVisible()
+
+
+def test_batch_selection_deletes_checked_feeds_and_exits_mode(qtbot, monkeypatch) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    service = window.feed_service
+
+    window.on_batch_delete_feeds()
+    window.feed_list.item(2).setCheckState(Qt.Checked)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+
+    window.on_batch_delete_feeds()
+
+    assert service.deleted_feed_batches == [["Engineering"]]
+    assert not window.feed_batch_selection_enabled
+    assert window.feed_list.count() == 2
+    assert window.batch_delete_feed_action.text() == "批量选择"
+
+
+def test_switching_to_tags_exits_feed_batch_selection(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+
+    window.on_batch_delete_feeds()
+    window.on_tag_tab()
+
+    assert not window.feed_batch_selection_enabled
+    assert window.current_sidebar_mode == "tags"
+    assert window.batch_delete_feed_action.text() == "批量选择"
+    assert not window.cancel_batch_delete_feed_action.isVisible()
