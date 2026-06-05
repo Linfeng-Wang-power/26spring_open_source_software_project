@@ -676,6 +676,7 @@ class MercuryMainWindow(QMainWindow):
         self.last_refresh_status = "尚未刷新"
         self.sidebar_collapsed = False
         self.sidebar_expanded_width = 225
+        self.feed_batch_selection_enabled = False
 
         self.setWindowTitle("Lumen")
         self.resize(1380, 860)
@@ -721,10 +722,16 @@ class MercuryMainWindow(QMainWindow):
         self.delete_feed_action.triggered.connect(self.on_delete_feed)
         toolbar.addAction(self.delete_feed_action)
 
-        self.batch_delete_feed_action = QAction("批量删除", self)
-        self.batch_delete_feed_action.setToolTip("删除左侧已勾选的订阅")
+        self.batch_delete_feed_action = QAction("批量选择", self)
+        self.batch_delete_feed_action.setToolTip("进入订阅批量选择模式")
         self.batch_delete_feed_action.triggered.connect(self.on_batch_delete_feeds)
         toolbar.addAction(self.batch_delete_feed_action)
+
+        self.cancel_batch_delete_feed_action = QAction("取消批量", self)
+        self.cancel_batch_delete_feed_action.setToolTip("退出订阅批量选择模式")
+        self.cancel_batch_delete_feed_action.triggered.connect(self.on_cancel_batch_delete_feeds)
+        self.cancel_batch_delete_feed_action.setVisible(False)
+        toolbar.addAction(self.cancel_batch_delete_feed_action)
 
         self.clean_action = QAction("清洗", self)
         self.clean_action.triggered.connect(self.on_clean_article)
@@ -1229,6 +1236,7 @@ class MercuryMainWindow(QMainWindow):
 
     def _load_feeds(self) -> None:
         selected_title = self.current_feed_title
+        checked_titles = set(self._checked_feed_titles()) if self.feed_batch_selection_enabled else set()
         self.current_sidebar_mode = "feeds"
         self.current_tag = None
         self.sidebar_title.setText("Feeds")
@@ -1240,9 +1248,11 @@ class MercuryMainWindow(QMainWindow):
                 label = f"{feed.title} ({feed.unread_count})" if feed.unread_count else feed.title
                 item.setText(label)
                 item.setData(Qt.UserRole, ("feed", feed.title))
-                if feed.title not in {"All Feeds", "Starred"}:
+                if self.feed_batch_selection_enabled and feed.title not in {"All Feeds", "Starred"}:
                     item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                    item.setCheckState(Qt.Unchecked)
+                    item.setCheckState(Qt.Checked if feed.title in checked_titles else Qt.Unchecked)
+                else:
+                    item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
                 self.feed_list.addItem(item)
                 if feed.title == selected_title:
                     self.feed_list.setCurrentItem(item)
@@ -1359,13 +1369,29 @@ class MercuryMainWindow(QMainWindow):
         has_article = article is not None
         can_delete_feed = (
             self.current_sidebar_mode == "feeds"
+            and not self.feed_batch_selection_enabled
             and bool(self._selected_feed_titles() or self.current_feed_title not in (None, "All Feeds", "Starred"))
         )
         has_tag = self.current_sidebar_mode == "tags" and bool(self.current_tag)
+        checked_feed_titles = self._checked_feed_titles()
 
         self.refresh_action.setEnabled(not (self.refresh_thread and self.refresh_thread.isRunning()))
         self.delete_feed_action.setEnabled(can_delete_feed)
-        self.batch_delete_feed_action.setEnabled(self.current_sidebar_mode == "feeds" and bool(self._checked_feed_titles()))
+        self.batch_delete_feed_action.setText(
+            "删除已选" if self.feed_batch_selection_enabled else "批量选择"
+        )
+        self.batch_delete_feed_action.setToolTip(
+            "删除左侧已勾选的订阅"
+            if self.feed_batch_selection_enabled
+            else "进入订阅批量选择模式"
+        )
+        self.batch_delete_feed_action.setEnabled(
+            self.current_sidebar_mode == "feeds"
+            and (not self.feed_batch_selection_enabled or bool(checked_feed_titles))
+        )
+        self.cancel_batch_delete_feed_action.setVisible(
+            self.current_sidebar_mode == "feeds" and self.feed_batch_selection_enabled
+        )
         self.clean_action.setEnabled(has_article and not (self.clean_thread and self.clean_thread.isRunning()))
         self.restore_action.setEnabled(has_article)
         self.star_action.setEnabled(has_article)
@@ -1511,6 +1537,7 @@ class MercuryMainWindow(QMainWindow):
         self._load_articles(self.current_feed_title)
 
     def on_tag_tab(self) -> None:
+        self.feed_batch_selection_enabled = False
         self._load_tags()
         if self.feed_list.count() > 0:
             self.feed_list.setCurrentRow(0)
@@ -1613,6 +1640,12 @@ class MercuryMainWindow(QMainWindow):
     def on_batch_delete_feeds(self) -> None:
         if self.current_sidebar_mode != "feeds":
             return
+        if not self.feed_batch_selection_enabled:
+            self.feed_batch_selection_enabled = True
+            self._load_feeds()
+            self.summary_text.setText("已进入批量选择模式，请勾选要删除的订阅。")
+            return
+
         checked_titles = self._checked_feed_titles()
         if not checked_titles:
             self.summary_text.setText("请先勾选要删除的订阅。")
@@ -1639,9 +1672,17 @@ class MercuryMainWindow(QMainWindow):
 
         self.current_feed_title = "All Feeds"
         self.current_article = None
+        self.feed_batch_selection_enabled = False
         self._load_feeds()
         self._load_articles(self.current_feed_title)
         self.summary_text.setText(f"已批量删除 {len(checked_titles)} 个订阅。")
+
+    def on_cancel_batch_delete_feeds(self) -> None:
+        if not self.feed_batch_selection_enabled:
+            return
+        self.feed_batch_selection_enabled = False
+        self._load_feeds()
+        self.summary_text.setText("已退出批量选择模式。")
 
     def _selected_feed_titles(self) -> list[str]:
         titles: list[str] = []
