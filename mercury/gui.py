@@ -35,12 +35,14 @@ try:
         QListWidget,
         QListWidgetItem,
         QMainWindow,
+        QMenu,
         QMessageBox,
         QPushButton,
         QSizePolicy,
         QSplitter,
         QTextBrowser,
         QToolBar,
+        QToolButton,
         QVBoxLayout,
         QWidget,
         QLineEdit,
@@ -824,11 +826,11 @@ class ArticleListItem(QWidget):
         self._on_star_clicked = on_star_clicked
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(12, 8, 10, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 10, 10, 10)
+        root.setSpacing(10)
 
         text_box = QVBoxLayout()
-        text_box.setSpacing(2)
+        text_box.setSpacing(4)
 
         self._title_label = QLabel(article.title)
         self._title_label.setObjectName("ArticleItemTitle")
@@ -861,8 +863,15 @@ class ArticleListItem(QWidget):
         self.article = article
         self._title_label.setText(article.title)
         title_font = self._title_label.font()
-        title_font.setBold(article.unread)
+        title_font.setPointSize(15 if article.unread else 12)
+        title_font.setWeight(QFont.Weight.Bold if article.unread else QFont.Weight.Normal)
         self._title_label.setFont(title_font)
+        self._title_label.setStyleSheet(
+            "color: #111111;" if article.unread else "color: #8a8f98;"
+        )
+        meta_font = self._meta_label.font()
+        meta_font.setPointSize(11 if article.unread else 9)
+        self._meta_label.setFont(meta_font)
         read_state = "未读" if article.unread else "已读"
         self._meta_label.setText(f"{article.feed_title} · {read_state}\n{article.published}")
         self._star_button.setText("★" if article.starred else "☆")
@@ -943,6 +952,20 @@ class MercuryMainWindow(QMainWindow):
     # UI construction
     # -----------------------------
 
+    def _add_toolbar_menu(self, toolbar: QToolBar, title: str, actions: list[QAction]) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("ToolbarMenuButton")
+        button.setText(title)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setCursor(Qt.PointingHandCursor)
+
+        menu = QMenu(button)
+        for action in actions:
+            menu.addAction(action)
+        button.setMenu(menu)
+        toolbar.addWidget(button)
+        return button
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("主工具栏")
         toolbar.setObjectName("TopToolbar")
@@ -960,84 +983,108 @@ class MercuryMainWindow(QMainWindow):
         self.sidebar_action.triggered.connect(self.on_toggle_sidebar)
         toolbar.addAction(self.sidebar_action)
 
-        # These actions are interface placeholders for future module wiring.
         self.refresh_action = QAction("刷新", self)
         self.refresh_action.triggered.connect(self.on_refresh_all)
-        toolbar.addAction(self.refresh_action)
 
         self.import_opml_action = QAction("导入 OPML", self)
         self.import_opml_action.triggered.connect(self.on_import_opml)
-        toolbar.addAction(self.import_opml_action)
 
         self.delete_feed_action = QAction("删除订阅", self)
         self.delete_feed_action.triggered.connect(self.on_delete_feed)
-        toolbar.addAction(self.delete_feed_action)
 
         self.batch_delete_feed_action = QAction("批量选择", self)
         self.batch_delete_feed_action.setToolTip("进入订阅批量选择模式")
         self.batch_delete_feed_action.triggered.connect(self.on_batch_delete_feeds)
-        toolbar.addAction(self.batch_delete_feed_action)
 
         self.cancel_batch_delete_feed_action = QAction("取消批量", self)
         self.cancel_batch_delete_feed_action.setToolTip("退出订阅批量选择模式")
         self.cancel_batch_delete_feed_action.triggered.connect(self.on_cancel_batch_delete_feeds)
         self.cancel_batch_delete_feed_action.setVisible(False)
-        toolbar.addAction(self.cancel_batch_delete_feed_action)
 
         self.clean_action = QAction("清洗", self)
         self.clean_action.triggered.connect(self.on_clean_article)
-        toolbar.addAction(self.clean_action)
 
         self.restore_action = QAction("还原", self)
         self.restore_action.setToolTip("显示文章未清洗前的摘要/原始列表内容")
         self.restore_action.triggered.connect(self.on_restore_article)
-        toolbar.addAction(self.restore_action)
 
         self.star_action = QAction("收藏", self)
         self.star_action.triggered.connect(self.on_toggle_starred)
-        toolbar.addAction(self.star_action)
 
         self.read_action = QAction("标记已读", self)
         self.read_action.triggered.connect(self.on_toggle_read_state)
-        toolbar.addAction(self.read_action)
 
         self.add_tag_action = QAction("添加标签", self)
         self.add_tag_action.triggered.connect(self.on_add_article_tag)
-        toolbar.addAction(self.add_tag_action)
 
         self.remove_tag_action = QAction("移除标签", self)
         self.remove_tag_action.triggered.connect(self.on_remove_article_tag)
-        toolbar.addAction(self.remove_tag_action)
 
         self.tag_mark_read_action = QAction("标签标已读", self)
         self.tag_mark_read_action.triggered.connect(self.on_mark_current_tag_read)
-        toolbar.addAction(self.tag_mark_read_action)
 
         self.tag_star_action = QAction("标签收藏", self)
         self.tag_star_action.triggered.connect(self.on_star_current_tag)
-        toolbar.addAction(self.tag_star_action)
 
         self.tag_clean_action = QAction("标签清洗", self)
         self.tag_clean_action.triggered.connect(self.on_clean_current_tag)
-        toolbar.addAction(self.tag_clean_action)
 
         self.summary_action = QAction("摘要", self)
         self.summary_action.triggered.connect(self.on_summary)
-        toolbar.addAction(self.summary_action)
 
         self.batch_summary_action = QAction("批量摘要", self)
         self.batch_summary_action.setToolTip(
             "在文章列表中按住 ⌘ / Ctrl 单击或 Shift 单击多选，然后点这里批量生成摘要"
         )
         self.batch_summary_action.triggered.connect(self.on_batch_summary)
-        toolbar.addAction(self.batch_summary_action)
 
         self.translation_action = QAction("翻译", self)
         self.translation_action.triggered.connect(self.on_translate)
-        toolbar.addAction(self.translation_action)
 
         self.settings_action = QAction("设置", self)
         self.settings_action.triggered.connect(self.on_open_settings)
+
+        self._add_toolbar_menu(
+            toolbar,
+            "订阅",
+            [
+                self.refresh_action,
+                self.import_opml_action,
+                self.delete_feed_action,
+                self.batch_delete_feed_action,
+                self.cancel_batch_delete_feed_action,
+            ],
+        )
+        self._add_toolbar_menu(
+            toolbar,
+            "文章",
+            [
+                self.clean_action,
+                self.restore_action,
+                self.star_action,
+                self.read_action,
+            ],
+        )
+        self._add_toolbar_menu(
+            toolbar,
+            "标签",
+            [
+                self.add_tag_action,
+                self.remove_tag_action,
+                self.tag_mark_read_action,
+                self.tag_star_action,
+                self.tag_clean_action,
+            ],
+        )
+        self._add_toolbar_menu(
+            toolbar,
+            "AI",
+            [
+                self.summary_action,
+                self.batch_summary_action,
+                self.translation_action,
+            ],
+        )
         toolbar.addAction(self.settings_action)
 
         spacer = QWidget()
@@ -1241,66 +1288,86 @@ class MercuryMainWindow(QMainWindow):
     # -----------------------------
 
     def _apply_styles(self) -> None:
-        self.setFont(QFont("Microsoft YaHei", 10))
+        base_font = QFont("Microsoft YaHei", 11)
+        base_font.setStyleStrategy(QFont.PreferAntialias)
+        self.setFont(base_font)
         self.setStyleSheet(
             """
             QMainWindow {
-                background: #f7f7f7;
+                background: #f6f7f8;
                 color: #1f2328;
             }
             QToolBar#TopToolbar {
-                background: #fbfbfb;
+                background: #fbfcfd;
                 border: 0;
-                border-bottom: 1px solid #e5e5e5;
+                border-bottom: 1px solid #dfe3e8;
                 spacing: 8px;
-                min-height: 42px;
+                min-height: 46px;
                 padding: 4px 8px;
             }
             QLabel#ToolbarTitle {
-                color: #4a4a4a;
-                font-size: 16px;
+                color: #24292f;
+                font-size: 18px;
                 font-weight: 700;
             }
+            QToolBar#TopToolbar QToolButton {
+                border: 0;
+                border-radius: 8px;
+                padding: 8px 12px;
+                background: transparent;
+                color: #24292f;
+                font-size: 16px;
+                font-weight: 500;
+            }
+            QToolBar#TopToolbar QToolButton:hover {
+                background: #eaeef2;
+            }
+            QToolBar#TopToolbar QToolButton::menu-indicator {
+                image: none;
+                width: 0;
+            }
             QLineEdit#SearchBox {
-                min-height: 28px;
-                border: 1px solid #e2e2e2;
-                border-radius: 14px;
+                min-height: 32px;
+                border: 1px solid #d8dee4;
+                border-radius: 16px;
                 padding: 0 12px;
                 background: #ffffff;
-                color: #333333;
+                color: #24292f;
+                font-size: 14px;
             }
             QFrame#Sidebar {
-                background: #f5f5f5;
-                border-right: 1px solid #dddddd;
+                background: #f2f4f7;
+                border-right: 1px solid #d8dee4;
             }
             QFrame#ArticlePanel {
                 background: #ffffff;
-                border-right: 1px solid #dddddd;
+                border-right: 1px solid #d8dee4;
             }
             QFrame#ReaderPanel {
                 background: #ffffff;
             }
             QLabel#SectionTitle {
-                font-size: 14px;
+                font-size: 16px;
                 font-weight: 700;
-                color: #2b2b2b;
+                color: #24292f;
             }
             QLabel#SmallLabel {
-                font-size: 12px;
-                color: #777777;
+                font-size: 13px;
+                color: #6e7781;
             }
             QPushButton {
                 border: 0;
                 border-radius: 7px;
-                padding: 6px 10px;
+                padding: 7px 11px;
                 background: transparent;
-                color: #202124;
+                color: #24292f;
+                font-size: 14px;
             }
             QPushButton:hover {
-                background: #ececec;
+                background: #eaeef2;
             }
             QPushButton:checked {
-                background: #0a84ff;
+                background: #0969da;
                 color: white;
                 font-weight: 700;
             }
@@ -1309,24 +1376,55 @@ class MercuryMainWindow(QMainWindow):
                 max-width: 26px;
                 min-height: 24px;
                 padding: 0;
-                font-size: 18px;
+                font-size: 19px;
             }
             QPushButton#SmallToolbarButton {
-                background: #eeeeee;
+                background: #eef1f4;
                 border-radius: 7px;
-                min-height: 26px;
+                min-height: 28px;
                 padding: 4px 10px;
             }
             QPushButton#PrimaryActionButton {
-                background: #0a84ff;
+                background: #0969da;
                 color: white;
                 font-weight: 700;
                 border-radius: 8px;
             }
             QPushButton#SecondaryActionButton {
-                background: #eeeeee;
+                background: #eef1f4;
                 color: #1f2328;
                 border-radius: 8px;
+            }
+            QToolButton#ToolbarMenuButton {
+                border: 0;
+                border-radius: 8px;
+                padding: 8px 12px;
+                background: transparent;
+                color: #24292f;
+                font-size: 16px;
+                font-weight: 500;
+            }
+            QToolButton#ToolbarMenuButton:hover {
+                background: #eaeef2;
+            }
+            QMenu {
+                background: #ffffff;
+                border: 1px solid #d8dee4;
+                border-radius: 8px;
+                padding: 6px;
+                color: #24292f;
+                font-size: 14px;
+            }
+            QMenu::item {
+                padding: 7px 28px 7px 12px;
+                border-radius: 6px;
+            }
+            QMenu::item:selected {
+                background: #e8f1ff;
+                color: #0969da;
+            }
+            QMenu::item:disabled {
+                color: #a8afb8;
             }
             QListWidget {
                 border: 0;
@@ -1334,57 +1432,58 @@ class MercuryMainWindow(QMainWindow):
                 background: transparent;
             }
             QListWidget#FeedList::item {
-                min-height: 30px;
-                padding: 4px 8px;
+                min-height: 34px;
+                padding: 5px 9px;
                 border-radius: 7px;
-                color: #111111;
+                color: #24292f;
+                font-size: 14px;
             }
             QListWidget#FeedList::item:selected {
-                background: #dcdcdc;
-                color: #111111;
+                background: #dbeafe;
+                color: #0f172a;
             }
             QListWidget#ArticleList::item {
-                border-bottom: 1px solid #eeeeee;
+                border-bottom: 1px solid #edf0f3;
                 border-left: 3px solid transparent;
             }
             QListWidget#ArticleList::item:selected {
-                background: #cfe3ff;
-                border-left: 3px solid #2469d6;
+                background: #e8f1ff;
+                border-left: 3px solid #0969da;
             }
             QFrame#ArticleHeader {
                 background: #ffffff;
-                border-bottom: 1px solid #e8e8e8;
-                min-height: 42px;
+                border-bottom: 1px solid #e5e9ef;
+                min-height: 48px;
             }
             QLabel#ArticleScope {
-                font-size: 14px;
+                font-size: 16px;
                 font-weight: 700;
-                color: #222222;
+                color: #24292f;
             }
             QLabel#ArticleItemTitle {
-                font-size: 13px;
-                font-weight: 600;
-                color: #333333;
+                font-size: 15px;
+                font-weight: 700;
+                color: #111111;
             }
             QLabel#ArticleItemMeta {
                 font-size: 11px;
                 line-height: 1.3;
-                color: #858585;
+                color: #6e7781;
             }
             QPushButton#StarButton {
                 border: 0;
                 background: transparent;
-                color: #0a84ff;
-                font-size: 18px;
+                color: #0969da;
+                font-size: 19px;
                 padding: 0;
             }
             QPushButton#StarButton:hover {
-                background: #edf3ff;
+                background: #e8f1ff;
                 border-radius: 6px;
             }
             QLabel#SidebarFooter {
-                font-size: 11px;
-                color: #8a8a8a;
+                font-size: 12px;
+                color: #6e7781;
                 padding: 6px 2px;
             }
             QTextBrowser#Reader {
@@ -1392,28 +1491,29 @@ class MercuryMainWindow(QMainWindow):
                 background: #ffffff;
             }
             QFrame#SummaryBar {
-                background: #fbfbfb;
-                border-top: 1px solid #dddddd;
-                min-height: 42px;
+                background: #fbfcfd;
+                border-top: 1px solid #d8dee4;
+                min-height: 46px;
             }
             QPushButton#SummaryToggle {
                 background: transparent;
-                color: #444444;
+                color: #57606a;
                 padding: 0;
             }
             QLabel#SummaryText {
-                color: #666666;
+                color: #57606a;
+                font-size: 14px;
             }
             QTextBrowser#SummaryPanel {
                 background: #fdfdfd;
                 border: 0;
-                border-top: 1px solid #e5e5e5;
+                border-top: 1px solid #e5e9ef;
                 color: #1f2328;
                 padding: 12px 18px;
-                font-size: 13px;
+                font-size: 14px;
             }
             QSplitter::handle {
-                background: #dddddd;
+                background: #d8dee4;
             }
             QSplitter::handle:horizontal {
                 width: 1px;
@@ -1604,7 +1704,7 @@ class MercuryMainWindow(QMainWindow):
         for article in self.current_articles:
             item = QListWidgetItem()
             widget = ArticleListItem(article, self.on_toggle_starred_from_list)
-            item.setSizeHint(QSize(280, 72))
+            item.setSizeHint(QSize(280, 84))
             item.setData(Qt.UserRole, article)
             self.article_list.addItem(item)
             self.article_list.setItemWidget(item, widget)
@@ -1739,7 +1839,7 @@ class MercuryMainWindow(QMainWindow):
         for index, article in enumerate(self.current_articles):
             item = QListWidgetItem()
             widget = ArticleListItem(article, self.on_toggle_starred_from_list)
-            item.setSizeHint(QSize(280, 72))
+            item.setSizeHint(QSize(280, 84))
             item.setData(Qt.UserRole, article)
             self.article_list.addItem(item)
             self.article_list.setItemWidget(item, widget)
@@ -1794,7 +1894,7 @@ class MercuryMainWindow(QMainWindow):
                 for article in self.current_articles:
                     item = QListWidgetItem()
                     widget = ArticleListItem(article, self.on_toggle_starred_from_list)
-                    item.setSizeHint(QSize(280, 72))
+                    item.setSizeHint(QSize(280, 84))
                     item.setData(Qt.UserRole, article)
                     self.article_list.addItem(item)
                     self.article_list.setItemWidget(item, widget)
@@ -2221,18 +2321,21 @@ class MercuryMainWindow(QMainWindow):
         self.refresh_worker = None
         self.refresh_action.setEnabled(True)
 
-    def on_clean_article(self) -> None:
-        if not self.current_article:
-            return
+    def _start_article_cleaning(
+        self,
+        article: Article,
+        *,
+        status_text: str,
+    ) -> None:
         if self.clean_thread is not None and self.clean_thread.isRunning():
             self.summary_text.setText("内容清洗正在进行，请稍候。")
             return
 
         self.clean_action.setEnabled(False)
-        self.summary_text.setText(f"正在清洗：{self.current_article.title}")
+        self.summary_text.setText(status_text)
 
         self.clean_thread = QThread(self)
-        self.clean_worker = CleanArticleWorker(self.reader_pipeline, self.current_article)
+        self.clean_worker = CleanArticleWorker(self.reader_pipeline, article)
         self.clean_worker.moveToThread(self.clean_thread)
         self.clean_thread.started.connect(self.clean_worker.run)
         self.clean_worker.finished.connect(self.on_clean_article_finished)
@@ -2243,6 +2346,14 @@ class MercuryMainWindow(QMainWindow):
         self.clean_thread.finished.connect(self.clean_thread.deleteLater)
         self.clean_thread.finished.connect(self._clear_clean_worker)
         self.clean_thread.start()
+
+    def on_clean_article(self) -> None:
+        if not self.current_article:
+            return
+        self._start_article_cleaning(
+            self.current_article,
+            status_text=f"正在清洗：{self.current_article.title}",
+        )
 
     @Slot(object, str, str, str)
     def on_clean_article_finished(
@@ -2260,7 +2371,10 @@ class MercuryMainWindow(QMainWindow):
 
         current_entry_id = getattr(self.current_article, "entry_id", "") if self.current_article else ""
         current_url = getattr(self.current_article, "url", "") if self.current_article else ""
-        if (entry_id and entry_id == current_entry_id) or (not entry_id and article_url == current_url):
+        if (
+            (entry_id and entry_id == current_entry_id)
+            or (not entry_id and article_url == current_url)
+        ):
             self.reader.setHtml(document.reader_html)
             self.summary_text.setText(f"已清洗并显示：{document.title}")
         else:

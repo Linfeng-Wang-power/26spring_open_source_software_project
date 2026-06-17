@@ -10,168 +10,220 @@ from mercury.reader.sanitizer import sanitize_html
 
 
 CLEANED_READER_CSS = """
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-  color: #202124;
-  background: #fbfaf7;
-  margin: 0;
-  padding: 46px 48px 88px 48px;
-  line-height: 1.78;
-  font-size: 18px;
+:root {
+  color-scheme: light;
 }
+body {
+  font-family: -apple-system, system-ui, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: #1a1a1a;
+  background: #ffffff;
+  margin: 0;
+  padding: 28px 34px 48px;
+  line-height: 1.6;
+  font-size: 17px;
+}
+.reader,
 .reader-shell {
-  max-width: 780px;
+  max-width: 800px;
   margin: 0 auto;
 }
 h1 {
-  margin: 0 auto 12px auto;
-  font-size: 40px;
-  line-height: 1.22;
-  font-weight: 800;
+  margin: 0 0 0.45em;
+  font-size: 2.05em;
+  line-height: 1.2;
+  font-weight: 760;
   letter-spacing: 0;
-  text-align: center;
-  color: #171717;
+  color: #151515;
 }
 .meta {
-  margin: 0 auto 38px auto;
-  color: #8c9198;
-  font-size: 13px;
+  margin: 0 0 2em;
+  padding: 0.75em 0 0.85em;
+  border-top: 1px solid #eeeeee;
+  border-bottom: 1px solid #eeeeee;
+  color: #555555;
+  font-size: 0.86em;
   line-height: 1.45;
-  text-align: center;
+  text-align: left;
   word-break: break-all;
 }
 h2,
-h3 {
-  margin: 34px 0 14px 0;
-  line-height: 1.32;
-  color: #1f2328;
+h3,
+h4,
+h5,
+h6 {
+  line-height: 1.25;
+  margin: 1.6em 0 0.6em;
+  color: #1a1a1a;
 }
 h2 {
-  font-size: 25px;
-  border-bottom: 1px solid #e7e2d8;
-  padding-bottom: 8px;
+  font-size: 1.45em;
+  font-weight: 720;
+  padding-bottom: 0.28em;
+  border-bottom: 1px solid #eeeeee;
 }
 h3 {
-  font-size: 21px;
+  font-size: 1.22em;
+  font-weight: 700;
+}
+h4,
+h5,
+h6 {
+  font-size: 1.06em;
+  font-weight: 700;
 }
 p {
-  margin: 0 0 20px 0;
+  margin: 0 0 1em;
 }
 a {
-  color: #2667a6;
+  color: #0a66cc;
   text-decoration: none;
-  border-bottom: 1px solid rgba(38, 103, 166, 0.28);
+  border-bottom: 1px solid rgba(10, 102, 204, 0.24);
 }
 a:hover {
-  color: #174a7c;
-  border-bottom-color: rgba(23, 74, 124, 0.55);
+  color: #074f9e;
+  border-bottom-color: rgba(7, 79, 158, 0.5);
 }
 img {
   display: block;
   max-width: 100%;
   height: auto;
-  margin: 26px auto;
-  border-radius: 6px;
+  margin: 1.15em auto;
+  border-radius: 8px;
 }
 pre {
   overflow-x: auto;
-  padding: 16px;
-  background: #f2f0ea;
-  border: 1px solid #e4ded3;
-  border-radius: 6px;
+  padding: 12px 14px;
+  margin: 0 0 1em;
+  background: #f6f6f6;
+  border: 0;
+  border-radius: 8px;
 }
 code {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-family: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 0.92em;
 }
 p code,
 li code {
-  background: #f1eee8;
+  background: #f6f6f6;
   border-radius: 4px;
-  padding: 2px 5px;
+  padding: 0.12em 0.34em;
 }
 blockquote {
-  margin: 28px 0;
-  padding: 4px 0 4px 18px;
-  border-left: 4px solid #c8bfae;
-  color: #5b6067;
+  margin: 1.2em 0;
+  padding-left: 1em;
+  border-left: 3px solid #dddddd;
+  color: #555555;
 }
 ul,
 ol {
-  padding-left: 26px;
-  margin: 0 0 20px 0;
+  padding-left: 1.6em;
+  margin: 0 0 1em;
 }
 li {
-  margin: 6px 0;
+  margin: 0.25em 0;
+}
+li > p {
+  margin: 0.35em 0;
 }
 table {
   border-collapse: collapse;
   width: 100%;
-  margin: 24px 0;
-  font-size: 15px;
+  margin: 0 0 1em;
+  font-size: 0.95em;
 }
 td,
 th {
-  border: 1px solid #ddd7cb;
-  padding: 8px 10px;
+  border: 1px solid #dddddd;
+  padding: 0.55em 0.7em;
+  text-align: left;
+  vertical-align: top;
 }
 th {
-  background: #f1eee8;
+  font-weight: 700;
+}
+thead th {
+  border-bottom-width: 2px;
+}
+tbody tr:nth-child(even) {
+  background: #f6f6f6;
+}
+hr {
+  border: 0;
+  border-top: 1px solid #eeeeee;
+  margin: 1.8em 0;
 }
 """
 
 
 PLAIN_READER_CSS = """
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-  color: #202124;
+  font-family: -apple-system, system-ui, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: #1a1a1a;
   background: #ffffff;
   margin: 0;
-  padding: 34px 54px 80px 54px;
-  line-height: 1.72;
-  font-size: 18px;
+  padding: 28px 34px 48px;
+  line-height: 1.6;
+  font-size: 17px;
+}
+.reader,
+.reader-shell {
+  max-width: 800px;
+  margin: 0 auto;
 }
 h1 {
-  font-size: 34px;
-  line-height: 1.18;
-  margin: 0 0 18px 0;
-  font-weight: 700;
+  font-size: 2.05em;
+  line-height: 1.2;
+  margin: 0 0 0.45em;
+  font-weight: 760;
   letter-spacing: 0;
 }
 .meta {
-  color: #555;
-  font-size: 15px;
-  margin-bottom: 28px;
+  color: #555555;
+  font-size: 0.86em;
+  margin: 0 0 2em;
+  padding: 0.75em 0 0.85em;
+  border-top: 1px solid #eeeeee;
+  border-bottom: 1px solid #eeeeee;
   word-break: break-all;
 }
+p {
+  margin: 0 0 1em;
+}
 a {
-  color: #2458a6;
+  color: #0a66cc;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(10, 102, 204, 0.24);
 }
 img {
   display: block;
   max-width: 100%;
   height: auto;
-  margin: 18px 0;
+  margin: 1.15em auto;
+  border-radius: 8px;
 }
 pre {
   overflow-x: auto;
-  padding: 14px;
-  background: #f6f8fa;
+  padding: 12px 14px;
+  background: #f6f6f6;
+  border-radius: 8px;
 }
 blockquote {
   margin-left: 0;
-  padding-left: 18px;
-  border-left: 4px solid #d0d7de;
-  color: #57606a;
+  padding-left: 1em;
+  border-left: 3px solid #dddddd;
+  color: #555555;
 }
 table {
   border-collapse: collapse;
   width: 100%;
+  margin: 0 0 1em;
 }
 td,
 th {
-  border: 1px solid #d0d7de;
-  padding: 6px 8px;
+  border: 1px solid #dddddd;
+  padding: 0.55em 0.7em;
+  text-align: left;
+  vertical-align: top;
 }
 """
 
@@ -195,14 +247,15 @@ def render_markdown_to_reader_html(
 <html>
   <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>{active_css}</style>
   </head>
   <body>
-    <main class="reader-shell">
+    <article class="reader reader-shell">
       <h1>{escape(title)}</h1>
       {metadata}
       {body_html}
-    </main>
+    </article>
   </body>
 </html>
 """
