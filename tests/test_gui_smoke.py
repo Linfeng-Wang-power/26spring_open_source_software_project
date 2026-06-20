@@ -7,7 +7,9 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
+    QLabel,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -245,6 +247,24 @@ def test_translate_button_runs_translation_worker(qtbot) -> None:
     panel = window.findChild(QTextBrowser, "SummaryPanel")
     assert panel is not None
     assert "translation:zh-CN" in panel.toPlainText()
+
+
+def test_reader_selection_shows_translation_popup(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    window.show()
+
+    cursor = window.reader.document().find("First paragraph")
+    assert not cursor.isNull()
+    window.reader.setTextCursor(cursor)
+
+    body = window.findChild(QLabel, "SelectionTranslationBody")
+    assert body is not None
+    qtbot.waitUntil(
+        lambda: "translation:zh-CN:First paragraph" in body.text(),
+        timeout=3000,
+    )
+    assert window.selection_translation_popup.isVisible()
 
 
 def test_batch_selection_deletes_checked_feeds_and_exits_mode(qtbot, monkeypatch) -> None:

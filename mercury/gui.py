@@ -17,7 +17,7 @@ from typing import Protocol
 import httpx
 
 try:
-    from PySide6.QtCore import QObject, Qt, QThread, QSize, Signal, Slot
+    from PySide6.QtCore import QObject, Qt, QThread, QSize, Signal, Slot, QTimer, QPoint
     from PySide6.QtGui import QAction, QFont, QIcon, QImage, QTextCursor, QTextDocument
     from PySide6.QtWidgets import (
         QApplication,
@@ -326,6 +326,49 @@ class CleanTagWorker(QObject):
             self.finished.emit(cleaned_count, "\n".join(errors))
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class SelectionTranslationWorker(QObject):
+    """Translate one selected text snippet away from the GUI thread."""
+
+    finished = Signal(int, str)
+    failed = Signal(int, str)
+
+    def __init__(
+        self,
+        agent,
+        *,
+        request_id: int,
+        text: str,
+        target_language: str,
+    ) -> None:
+        super().__init__()
+        self._agent = agent
+        self._request_id = request_id
+        self._text = text
+        self._target_language = target_language
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            from mercury.agent.translation.translation_agent import TranslationRequest
+
+            result = self._agent.run(
+                TranslationRequest(
+                    entry_id=f"selection-{self._request_id}",
+                    title="Selected text",
+                    content=self._text,
+                    target_language=self._target_language,
+                )
+            )
+            translated = "\n\n".join(
+                segment.trans_text for segment in result.segments if segment.trans_text
+            ).strip()
+            if not translated:
+                raise RuntimeError("Provider returned empty response")
+            self.finished.emit(self._request_id, translated)
+        except Exception as exc:
+            self.failed.emit(self._request_id, str(exc))
 
 
 class SettingsStore(Protocol):
@@ -925,6 +968,16 @@ class MercuryMainWindow(QMainWindow):
         self.translation_worker = None
         self.translation_active_job = None
         self.translation_job_counter = 0
+        self.selection_translation_thread: QThread | None = None
+        self.selection_translation_worker = None
+        self.selection_translation_request_id = 0
+        self.selection_translation_pending_text = ""
+        self.selection_translation_cache: dict[tuple[str, str], str] = {}
+        self.selection_translation_timer = QTimer(self)
+        self.selection_translation_timer.setSingleShot(True)
+        self.selection_translation_timer.timeout.connect(
+            self._translate_current_reader_selection
+        )
         self.batch_summary_thread: QThread | None = None
         self.batch_summary_worker = None
         self._batch_dialog = None
@@ -1219,7 +1272,22 @@ class MercuryMainWindow(QMainWindow):
         self.reader = ReaderTextBrowser()
         self.reader.setObjectName("Reader")
         self.reader.setOpenExternalLinks(True)
+        self.reader.selectionChanged.connect(self._on_reader_selection_changed)
         layout.addWidget(self.reader, 1)
+
+        self.selection_translation_popup = QFrame(self.reader.viewport())
+        self.selection_translation_popup.setObjectName("SelectionTranslationPopup")
+        self.selection_translation_popup.setVisible(False)
+        popup_layout = QVBoxLayout(self.selection_translation_popup)
+        popup_layout.setContentsMargins(12, 10, 12, 10)
+        popup_layout.setSpacing(4)
+        self.selection_translation_title = QLabel("划词翻译")
+        self.selection_translation_title.setObjectName("SelectionTranslationTitle")
+        self.selection_translation_body = QLabel("")
+        self.selection_translation_body.setObjectName("SelectionTranslationBody")
+        self.selection_translation_body.setWordWrap(True)
+        popup_layout.addWidget(self.selection_translation_title)
+        popup_layout.addWidget(self.selection_translation_body)
         return panel
 
     def _create_summary_bar(self) -> QWidget:
@@ -1493,6 +1561,21 @@ class MercuryMainWindow(QMainWindow):
             QTextBrowser#Reader {
                 border: 0;
                 background: #ffffff;
+            }
+            QFrame#SelectionTranslationPopup {
+                background: #ffffff;
+                border: 1px solid #c9d1d9;
+                border-radius: 8px;
+            }
+            QLabel#SelectionTranslationTitle {
+                color: #57606a;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel#SelectionTranslationBody {
+                color: #1f2328;
+                font-size: 14px;
+                line-height: 1.35;
             }
             QFrame#SummaryBar {
                 background: #fbfcfd;
@@ -1772,6 +1855,126 @@ class MercuryMainWindow(QMainWindow):
         if not entry_id or not hasattr(self.feed_service, "get_reader_document"):
             return None
         return self.feed_service.get_reader_document(entry_id)
+
+    def _selected_reader_text(self) -> str:
+        cursor = self.reader.textCursor()
+        # QTextCursor.selectedText uses U+2029 for paragraph separators.
+        return cursor.selectedText().replace("\u2029", "\n").strip()
+
+    @Slot()
+    def _on_reader_selection_changed(self) -> None:
+        text = self._selected_reader_text()
+        if not text:
+            self.selection_translation_timer.stop()
+            self.selection_translation_pending_text = ""
+            self.selection_translation_request_id += 1
+            self.selection_translation_popup.hide()
+            return
+        # Keep accidental whole-article selections from becoming expensive.
+        if len(text) > 1200:
+            text = text[:1200].rstrip()
+        self.selection_translation_pending_text = text
+        self.selection_translation_timer.start(450)
+
+    def _translate_current_reader_selection(self) -> None:
+        text = self.selection_translation_pending_text.strip()
+        if not text or text != self._selected_reader_text()[: len(text)].strip():
+            return
+        self._start_selection_translation(text)
+
+    def _start_selection_translation(self, text: str) -> None:
+        target_lang = self._resolve_target_language()
+        cache_key = (target_lang, text)
+        if cache_key in self.selection_translation_cache:
+            self._show_selection_translation_popup(
+                self.selection_translation_cache[cache_key]
+            )
+            return
+
+        self._show_selection_translation_popup("翻译中…")
+        agent = self._ensure_selection_translation_agent()
+        if agent is None:
+            self._show_selection_translation_popup("请先在设置中配置 Provider。")
+            return
+        if (
+            self.selection_translation_thread is not None
+            and self.selection_translation_thread.isRunning()
+        ):
+            self._show_selection_translation_popup("上一段划词翻译还在进行…")
+            return
+
+        self.selection_translation_request_id += 1
+        request_id = self.selection_translation_request_id
+        thread = QThread(self)
+        worker = SelectionTranslationWorker(
+            agent,
+            request_id=request_id,
+            text=text,
+            target_language=target_lang,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_selection_translation_finished)
+        worker.failed.connect(self._on_selection_translation_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_selection_translation_worker)
+        self.selection_translation_thread = thread
+        self.selection_translation_worker = worker
+        thread.start()
+
+    def _ensure_selection_translation_agent(self):
+        agent = getattr(self, "translation_agent", None)
+        if agent is not None and not isinstance(agent, MockTranslationAgent):
+            return agent
+        try:
+            from mercury.agent.translation.runtime_config import build_runtime
+        except Exception:
+            return None
+        runtime, status = build_runtime(self._settings_store_or_none())
+        if runtime is None or not status.ok:
+            return None
+        self.translation_agent = runtime
+        return runtime
+
+    def _show_selection_translation_popup(self, text: str) -> None:
+        self.selection_translation_body.setText(text)
+        viewport = self.reader.viewport()
+        width = min(360, max(240, viewport.width() - 24))
+        self.selection_translation_popup.setFixedWidth(width)
+        self.selection_translation_popup.adjustSize()
+        cursor_rect = self.reader.cursorRect(self.reader.textCursor())
+        pos = cursor_rect.bottomRight() + QPoint(12, 12)
+        popup_size = self.selection_translation_popup.sizeHint()
+        if pos.x() + popup_size.width() > viewport.width():
+            pos.setX(max(8, viewport.width() - popup_size.width() - 8))
+        if pos.y() + popup_size.height() > viewport.height():
+            pos.setY(max(8, cursor_rect.top() - popup_size.height() - 12))
+        self.selection_translation_popup.move(pos)
+        self.selection_translation_popup.show()
+        self.selection_translation_popup.raise_()
+
+    @Slot(int, str)
+    def _on_selection_translation_finished(self, request_id: int, translated: str) -> None:
+        if request_id != self.selection_translation_request_id:
+            return
+        selected = self.selection_translation_pending_text.strip()
+        if selected:
+            self.selection_translation_cache[(self._resolve_target_language(), selected)] = translated
+        self._show_selection_translation_popup(translated)
+
+    @Slot(int, str)
+    def _on_selection_translation_failed(self, request_id: int, message: str) -> None:
+        if request_id != self.selection_translation_request_id:
+            return
+        self._show_selection_translation_popup(f"翻译失败：{message}")
+
+    @Slot()
+    def _clear_selection_translation_worker(self) -> None:
+        self.selection_translation_thread = None
+        self.selection_translation_worker = None
 
     def _refresh_action_states(self) -> None:
         article = self.current_article
