@@ -468,7 +468,9 @@ class SummaryStore:
 class TranslationStore:
     """Storage interface for Translation Agent segment results.
 
-    Schema is live (migration 0003).  Implementation to be filled in by 张睿桐.
+    Backed by ``translation_segments`` (migration 0003). Results are stored as
+    a full replacement for one entry + target language so stale segments cannot
+    survive after re-translation.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -485,13 +487,76 @@ class TranslationStore:
         Each dict in *segments* must have keys:
         ``source_hash``, ``source_text``, ``trans_text``, ``position``.
         """
-        raise NotImplementedError
+        if not entry_id:
+            raise ValueError("entry_id must not be empty")
+        if not target_lang or not target_lang.strip():
+            raise ValueError("target_lang must not be empty")
+        if not segments:
+            raise ValueError("segments must not be empty")
+
+        normalized: list[dict] = []
+        for index, segment in enumerate(segments):
+            source_text = str(segment.get("source_text") or "").strip()
+            trans_text = str(segment.get("trans_text") or "").strip()
+            source_hash = str(segment.get("source_hash") or "").strip()
+            position = int(segment.get("position", index))
+            if not source_text:
+                raise ValueError("source_text must not be empty")
+            if not trans_text:
+                raise ValueError("trans_text must not be empty")
+            if not source_hash:
+                raise ValueError("source_hash must not be empty")
+            normalized.append(
+                {
+                    "segment_id": f"{entry_id}:{target_lang}:{position}:{source_hash}",
+                    "source_hash": source_hash,
+                    "source_text": source_text,
+                    "trans_text": trans_text,
+                    "position": position,
+                }
+            )
+
+        with self._conn:
+            self._conn.execute(
+                """DELETE FROM translation_segments
+                   WHERE entry_id = ? AND target_lang = ?""",
+                (entry_id, target_lang),
+            )
+            self._conn.executemany(
+                """INSERT INTO translation_segments
+                   (segment_id, entry_id, source_hash, source_text, trans_text,
+                    target_lang, position, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        segment["segment_id"],
+                        entry_id,
+                        segment["source_hash"],
+                        segment["source_text"],
+                        segment["trans_text"],
+                        target_lang,
+                        segment["position"],
+                        _now(),
+                    )
+                    for segment in normalized
+                ],
+            )
 
     def get_segments(
         self, entry_id: str, target_lang: str = "zh-CN"
     ) -> list[dict]:
         """Return translated segments ordered by position, or [] if not cached."""
-        raise NotImplementedError
+        if not entry_id or not target_lang:
+            return []
+        rows = self._conn.execute(
+            """SELECT segment_id, entry_id, source_hash, source_text, trans_text,
+                      target_lang, position, created_at
+               FROM translation_segments
+               WHERE entry_id = ? AND target_lang = ?
+               ORDER BY position ASC""",
+            (entry_id, target_lang),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 class ProviderStore:

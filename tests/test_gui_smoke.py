@@ -18,6 +18,11 @@ from PySide6.QtWidgets import (
 )
 
 from mercury.gui import Article, Feed, MercuryMainWindow
+from mercury.agent.translation.translation_agent import (
+    TranslationRequest,
+    TranslationResult,
+    TranslationSegment,
+)
 
 
 class StubFeedService:
@@ -108,8 +113,29 @@ class StubSummaryAgent:
 
 
 class StubTranslationAgent:
-    def translate(self, article: Article, target_language: str = "zh-CN") -> str:
-        return f"translation:{target_language}:{article.title}"
+    class _Template:
+        fingerprint = "stubfp"
+
+    template = _Template()
+
+    def build_model_id(self) -> str:
+        return "stub-model@stubfp"
+
+    def run(self, request: TranslationRequest) -> TranslationResult:
+        return TranslationResult(
+            entry_id=request.entry_id,
+            target_language=request.target_language,
+            segments=(
+                TranslationSegment(
+                    source_text=request.content,
+                    trans_text=f"translation:{request.target_language}:{request.content}",
+                    source_hash="stubhash",
+                    position=0,
+                ),
+            ),
+            model_id=self.build_model_id(),
+            template_fingerprint=self.template.fingerprint,
+        )
 
 
 def build_window() -> MercuryMainWindow:
@@ -203,6 +229,22 @@ def test_feed_checkboxes_only_show_in_batch_selection_mode(qtbot) -> None:
     assert not engineering_item.flags() & Qt.ItemIsUserCheckable
     assert window.batch_delete_feed_action.text() == "批量选择"
     assert not window.cancel_batch_delete_feed_action.isVisible()
+
+
+def test_translate_button_runs_translation_worker(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    window.show()
+
+    window.on_translate()
+
+    qtbot.waitUntil(
+        lambda: "翻译完成" in window.summary_text.text(),
+        timeout=2000,
+    )
+    panel = window.findChild(QTextBrowser, "SummaryPanel")
+    assert panel is not None
+    assert "translation:zh-CN" in panel.toPlainText()
 
 
 def test_batch_selection_deletes_checked_feeds_and_exits_mode(qtbot, monkeypatch) -> None:
