@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -17,6 +18,8 @@ from mercury.agent.translation.translation_agent import (
 )
 from mercury.agent.translation.segmenter import segment_markdown
 
+EMIT_INTERVAL_MS = 80
+
 
 @dataclass(frozen=True)
 class TranslationJob:
@@ -30,6 +33,7 @@ class TranslationWorker(QObject):
     """QObject worker with progress and terminal signals."""
 
     started = Signal(int, str, int)
+    token = Signal(int, str, int, str, str, int, int)
     progress = Signal(int, str, int, int)
     finished = Signal(int, str, object)
     failed = Signal(int, str, str)
@@ -67,14 +71,20 @@ class TranslationWorker(QObject):
                 if self._cancel.is_set():
                     self.cancelled.emit(job_id, entry_id)
                     return
-                partial_request = TranslationRequest(
-                    entry_id=self._request.entry_id,
-                    title=self._request.title,
-                    content=source.source_text,
-                    target_language=self._request.target_language,
-                )
-                partial_result = self._agent.run(partial_request)
-                translated.extend(partial_result.segments)
+                if hasattr(self._agent, "prepare_segment_stream"):
+                    segment = self._stream_one_segment(source, index, total)
+                else:
+                    segment = self._run_one_segment_for_legacy_agent(source)
+                    self.token.emit(
+                        job_id,
+                        entry_id,
+                        source.position,
+                        source.source_text,
+                        segment.trans_text,
+                        index,
+                        total,
+                    )
+                translated.append(segment)
                 self.progress.emit(job_id, entry_id, index, total)
 
             if self._cancel.is_set():
@@ -96,6 +106,8 @@ class TranslationWorker(QObject):
                 model_id=self._agent.build_model_id(),
                 template_fingerprint=self._agent.template.fingerprint,
             )
+        except _TranslationCancelled:
+            return
         except ProviderError as exc:
             self.failed.emit(job_id, entry_id, str(exc))
             return
@@ -107,3 +119,82 @@ class TranslationWorker(QObject):
             return
 
         self.finished.emit(job_id, entry_id, result)
+
+    def _stream_one_segment(self, source, current: int, total: int) -> TranslationSegment:
+        job_id = self._job.job_id
+        entry_id = self._job.entry_id
+        meta, deltas = self._agent.prepare_segment_stream(self._request, source)
+        del meta
+
+        buffer: list[str] = []
+        accumulated: list[str] = []
+        last_emit = time.monotonic()
+
+        for delta in deltas:
+            if self._cancel.is_set():
+                self.cancelled.emit(job_id, entry_id)
+                raise _TranslationCancelled()
+            if not delta:
+                continue
+            buffer.append(delta)
+            accumulated.append(delta)
+            now = time.monotonic()
+            if (now - last_emit) * 1000 >= EMIT_INTERVAL_MS:
+                self.token.emit(
+                    job_id,
+                    entry_id,
+                    source.position,
+                    source.source_text,
+                    "".join(buffer),
+                    current,
+                    total,
+                )
+                buffer.clear()
+                last_emit = now
+
+        if buffer:
+            self.token.emit(
+                job_id,
+                entry_id,
+                source.position,
+                source.source_text,
+                "".join(buffer),
+                current,
+                total,
+            )
+
+        trans_text = "".join(accumulated).strip()
+        if not trans_text:
+            raise TranslationAgentError(
+                f"Provider returned empty response for segment {source.position}"
+            )
+        return TranslationSegment(
+            source_text=source.source_text,
+            trans_text=trans_text,
+            source_hash=source.source_hash,
+            position=source.position,
+        )
+
+    def _run_one_segment_for_legacy_agent(self, source) -> TranslationSegment:
+        partial_request = TranslationRequest(
+            entry_id=self._request.entry_id,
+            title=self._request.title,
+            content=source.source_text,
+            target_language=self._request.target_language,
+        )
+        partial_result = self._agent.run(partial_request)
+        if not partial_result.segments:
+            raise TranslationAgentError(
+                f"Provider returned empty response for segment {source.position}"
+            )
+        segment = partial_result.segments[0]
+        return TranslationSegment(
+            source_text=source.source_text,
+            trans_text=segment.trans_text,
+            source_hash=source.source_hash,
+            position=source.position,
+        )
+
+
+class _TranslationCancelled(Exception):
+    """Internal sentinel used to unwind the streaming loop."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable, Iterator
 
 from mercury.agent.provider.llm_provider import ChatMessage, LLMProvider, ProviderError
 from mercury.agent.prompts.template_renderer import (
@@ -53,6 +54,14 @@ class TranslationResult:
     entry_id: str
     target_language: str
     segments: tuple[TranslationSegment, ...]
+    model_id: str
+    template_fingerprint: str
+
+
+@dataclass(frozen=True)
+class TranslationStreamMeta:
+    """Metadata available before a segment stream is consumed."""
+
     model_id: str
     template_fingerprint: str
 
@@ -123,6 +132,77 @@ class TranslationAgent:
             model_id=self.build_model_id(),
             template_fingerprint=fingerprint,
         )
+
+    def stream_segments(
+        self,
+        request: TranslationRequest,
+        *,
+        on_token: Callable[[SourceSegment, str], None] | None = None,
+    ) -> TranslationResult:
+        """Translate all segments with provider streaming.
+
+        ``on_token`` receives each raw delta together with its source segment.
+        The returned result is assembled from the same deltas and should be
+        persisted only after the whole run succeeds.
+        """
+        source_segments = segment_markdown(request.content)
+        if not source_segments:
+            raise TranslationAgentError("No translatable segments found")
+
+        translated: list[TranslationSegment] = []
+        fingerprint = self._template.fingerprint
+        for source in source_segments:
+            meta, deltas = self.prepare_segment_stream(request, source)
+            accumulated: list[str] = []
+            try:
+                for delta in deltas:
+                    if not delta:
+                        continue
+                    accumulated.append(delta)
+                    if on_token:
+                        on_token(source, delta)
+            except ProviderError:
+                raise
+            except Exception as exc:
+                raise TranslationAgentError(f"Stream error: {exc}") from exc
+
+            trans_text = "".join(accumulated).strip()
+            if not trans_text:
+                raise TranslationAgentError(
+                    f"Provider returned empty response for segment {source.position}"
+                )
+            translated.append(
+                TranslationSegment(
+                    source_text=source.source_text,
+                    trans_text=trans_text,
+                    source_hash=source.source_hash,
+                    position=source.position,
+                )
+            )
+            fingerprint = meta.template_fingerprint
+
+        return TranslationResult(
+            entry_id=request.entry_id,
+            target_language=request.target_language,
+            segments=tuple(translated),
+            model_id=self.build_model_id(),
+            template_fingerprint=fingerprint,
+        )
+
+    def prepare_segment_stream(
+        self, request: TranslationRequest, source: SourceSegment
+    ) -> tuple[TranslationStreamMeta, Iterator[str]]:
+        """Render one segment prompt and start a provider stream."""
+        rendered = self._render(request, source)
+        messages = [
+            ChatMessage(role=m.role, content=m.content)
+            for m in rendered.messages
+        ]
+        meta = TranslationStreamMeta(
+            model_id=self.build_model_id(),
+            template_fingerprint=rendered.template_fingerprint,
+        )
+        return meta, self._provider.stream(messages)
 
     def _render(
         self, request: TranslationRequest, source: SourceSegment
