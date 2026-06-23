@@ -47,6 +47,46 @@ def test_render_substitutes_variables() -> None:
     assert rendered.template_fingerprint == template.fingerprint
 
 
+def test_summary_prompt_uses_shorter_output_contract() -> None:
+    template = load_template("summary.default")
+    rendered = render_template(
+        template,
+        {
+            "target_language": "zh-CN",
+            "detail_level": "default",
+            "title": "Hello",
+            "content": "World content",
+        },
+    )
+    system = next(m.content for m in rendered.messages if m.role == "system")
+
+    assert '"default": one core sentence, then 3-4 bullets' in system
+    assert '"detailed": one core sentence, then 4-5 bullets' in system
+    assert "Prefer omission over length" in system
+    assert "4-7 sentences" not in system
+    assert "up to 10 sentences" not in system
+
+
+def test_summary_prompt_keeps_faithfulness_constraints() -> None:
+    template = load_template("summary.default")
+    rendered = render_template(
+        template,
+        {
+            "target_language": "zh-CN",
+            "detail_level": "default",
+            "title": "Hello",
+            "content": "World content",
+        },
+    )
+    system = next(m.content for m in rendered.messages if m.role == "system")
+    compact_system = " ".join(system.split())
+
+    assert "Ground every claim in the source text only" in system
+    assert "Do not invent facts" in system
+    assert "preserving the source's main claim, key evidence" in compact_system
+    assert "do not remove the central claim" in system
+
+
 def test_render_missing_variable_raises() -> None:
     template = load_template("summary.default")
     with pytest.raises(PromptError):
