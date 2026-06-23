@@ -6,6 +6,7 @@ from mercury.agent.translation.translation_agent import (
     TranslationRequest,
     TranslationResult,
     TranslationSegment,
+    TranslationStreamMeta,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "TranslationRequest",
     "TranslationResult",
     "TranslationSegment",
+    "TranslationStreamMeta",
 ]

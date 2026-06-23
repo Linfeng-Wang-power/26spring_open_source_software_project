@@ -26,6 +26,7 @@ class FakeProvider:
         self.responses = responses or ["译文"]
         self.raise_on_complete = raise_on_complete
         self.calls: list[list[ChatMessage]] = []
+        self.stream_calls: list[list[ChatMessage]] = []
 
     def complete(self, messages: Iterable[ChatMessage]) -> str:
         if self.raise_on_complete:
@@ -36,7 +37,13 @@ class FakeProvider:
         return self.responses[index] if index < len(self.responses) else self.responses[-1]
 
     def stream(self, messages: Iterable[ChatMessage]) -> Iterator[str]:
-        yield from ()
+        materialized = list(messages)
+        self.stream_calls.append(materialized)
+        index = len(self.stream_calls) - 1
+        text = self.responses[index] if index < len(self.responses) else self.responses[-1]
+        mid = max(1, len(text) // 2)
+        yield text[:mid]
+        yield text[mid:]
 
 
 @pytest.fixture()
@@ -95,3 +102,24 @@ def test_provider_error_propagates(request_obj: TranslationRequest) -> None:
 def test_request_rejects_empty_content() -> None:
     with pytest.raises(TranslationAgentError):
         TranslationRequest(entry_id="e1", title="x", content="")
+
+
+def test_stream_segments_emits_tokens_and_returns_result(
+    request_obj: TranslationRequest,
+) -> None:
+    provider = FakeProvider(["first translated", "second translated"])
+    agent = TranslationAgent(provider)
+    tokens: list[tuple[int, str]] = []
+
+    result = agent.stream_segments(
+        request_obj,
+        on_token=lambda source, delta: tokens.append((source.position, delta)),
+    )
+
+    assert [s.trans_text for s in result.segments] == [
+        "first translated",
+        "second translated",
+    ]
+    assert [position for position, _delta in tokens] == [0, 0, 1, 1]
+    assert "".join(delta for position, delta in tokens if position == 0) == "first translated"
+    assert len(provider.stream_calls) == 2

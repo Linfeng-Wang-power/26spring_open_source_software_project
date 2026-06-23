@@ -968,6 +968,7 @@ class MercuryMainWindow(QMainWindow):
         self.translation_worker = None
         self.translation_active_job = None
         self.translation_job_counter = 0
+        self.translation_segments_buffer: list[dict] = []
         self.selection_translation_thread: QThread | None = None
         self.selection_translation_worker = None
         self.selection_translation_request_id = 0
@@ -3060,6 +3061,7 @@ class MercuryMainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.started.connect(self._on_translation_started)
+        worker.token.connect(self._on_translation_token)
         worker.progress.connect(self._on_translation_progress)
         worker.finished.connect(self._on_translation_finished)
         worker.failed.connect(self._on_translation_failed)
@@ -3103,9 +3105,53 @@ class MercuryMainWindow(QMainWindow):
     def _on_translation_started(self, job_id: int, entry_id: str, total: int) -> None:
         if not self._is_active_translation_job(job_id, entry_id):
             return
+        self.translation_segments_buffer = []
         self.summary_text.setText(f"翻译中… 0/{total} 段")
         self._render_summary_panel("")
         self._auto_expand_summary_panel()
+
+    @Slot(int, str, int, str, str, int, int)
+    def _on_translation_token(
+        self,
+        job_id: int,
+        entry_id: str,
+        position: int,
+        source_text: str,
+        chunk: str,
+        current: int,
+        total: int,
+    ) -> None:
+        if not self._is_active_translation_job(job_id, entry_id):
+            return
+        self._append_translation_token(position, source_text, chunk)
+        if self._is_current_entry(entry_id):
+            translated_chars = sum(
+                len(str(segment.get("trans_text") or ""))
+                for segment in self.translation_segments_buffer
+            )
+            self.summary_text.setText(
+                f"翻译中… 第 {current}/{total} 段，{translated_chars} 字"
+            )
+            self._render_summary_panel(
+                self._format_translation_markdown(self.translation_segments_buffer)
+            )
+
+    def _append_translation_token(
+        self, position: int, source_text: str, chunk: str
+    ) -> None:
+        for segment in self.translation_segments_buffer:
+            if segment.get("position") == position:
+                segment["trans_text"] = str(segment.get("trans_text") or "") + chunk
+                return
+        self.translation_segments_buffer.append(
+            {
+                "source_hash": "",
+                "source_text": source_text,
+                "trans_text": chunk,
+                "position": position,
+            }
+        )
+        self.translation_segments_buffer.sort(key=lambda item: item.get("position", 0))
 
     @Slot(int, str, int, int)
     def _on_translation_progress(
@@ -3129,6 +3175,7 @@ class MercuryMainWindow(QMainWindow):
             }
             for segment in result.segments
         ]
+        self.translation_segments_buffer = segments
         store = self._translation_store()
         if store is not None and segments:
             try:
@@ -3160,6 +3207,7 @@ class MercuryMainWindow(QMainWindow):
         self.translation_thread = None
         self.translation_worker = None
         self.translation_active_job = None
+        self.translation_segments_buffer = []
 
     def _is_active_translation_job(self, job_id: int, entry_id: str) -> bool:
         active = self.translation_active_job
