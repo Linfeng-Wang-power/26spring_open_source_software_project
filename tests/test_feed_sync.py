@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
+
 import httpx
 import pytest
 

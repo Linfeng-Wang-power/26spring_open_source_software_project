@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QListWidget, QMainWindow, QSplitter, QTextBrowser,
 from mercury_gui import Article, Feed, MercuryMainWindow
 
 
+
 class StubFeedService:
     def __init__(self) -> None:
         self.feeds = [

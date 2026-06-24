@@ -8,7 +8,8 @@ from reader.pipeline import ReaderPipelineService
 from reader.sanitizer import clean_reader_html
 
 
-ARTICLE_HTML = """
+ARTICLE_HTML = """ 
+
 <!doctype html>
 <html>
   <head><title>Mercury Reader Test</title></head>
