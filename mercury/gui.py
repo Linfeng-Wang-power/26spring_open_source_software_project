@@ -9,6 +9,7 @@ Install GUI dependency if needed:
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -17,8 +18,8 @@ from typing import Protocol
 import httpx
 
 try:
-    from PySide6.QtCore import QObject, Qt, QThread, QSize, Signal, Slot, QTimer, QPoint
-    from PySide6.QtGui import QAction, QFont, QIcon, QImage, QTextCursor, QTextDocument
+    from PySide6.QtCore import QObject, Qt, QThread, QSize, QUrl, Signal, Slot, QTimer, QPoint
+    from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QImage, QTextCursor, QTextDocument
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -54,6 +55,13 @@ except ModuleNotFoundError as exc:
 from mercury.storage import StorageService
 from mercury.reader import ReaderPipelineService
 from mercury.reader.models import ReaderDocument
+
+try:
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except ModuleNotFoundError:
+    QWebEnginePage = None
+    QWebEngineView = None
 
 
 # -----------------------------
@@ -224,6 +232,43 @@ class ReaderTextBrowser(QTextBrowser):
 
         self._image_cache[url] = image
         return image
+
+
+if QWebEnginePage is not None and QWebEngineView is not None:
+
+    class ReaderWebEnginePage(QWebEnginePage):
+        """Reader page that sends external links to the system browser."""
+
+        def acceptNavigationRequest(self, url: QUrl, navigation_type: object, is_main_frame: bool) -> bool:
+            link_clicked = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+            if navigation_type == link_clicked and url.scheme() in {"http", "https", "mailto"}:
+                QDesktopServices.openUrl(url)
+                return False
+            return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
+
+
+    class ReaderWebEngineView(QWebEngineView):
+        """Browser-backed reader view with full CSS support."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.setPage(ReaderWebEnginePage(self))
+
+        def setHtml(self, html: str, base_url: QUrl | None = None) -> None:
+            super().setHtml(html, base_url or QUrl("about:blank"))
+
+
+else:
+    ReaderWebEngineView = None
+
+
+def create_reader_view() -> QWidget:
+    """Create the best available reader renderer."""
+
+    requested_renderer = os.environ.get("MERCURY_READER_RENDERER", "webengine").strip().lower()
+    if requested_renderer != "text" and ReaderWebEngineView is not None:
+        return ReaderWebEngineView()
+    return ReaderTextBrowser()
 
 
 class CleanArticleWorker(QObject):
@@ -1270,13 +1315,15 @@ class MercuryMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.reader = ReaderTextBrowser()
+        self.reader = create_reader_view()
         self.reader.setObjectName("Reader")
-        self.reader.setOpenExternalLinks(True)
-        self.reader.selectionChanged.connect(self._on_reader_selection_changed)
+        if isinstance(self.reader, QTextBrowser):
+            self.reader.setOpenExternalLinks(True)
+        if hasattr(self.reader, "selectionChanged"):
+            self.reader.selectionChanged.connect(self._on_reader_selection_changed)
         layout.addWidget(self.reader, 1)
 
-        self.selection_translation_popup = QFrame(self.reader.viewport())
+        self.selection_translation_popup = QFrame(self._reader_overlay_parent())
         self.selection_translation_popup.setObjectName("SelectionTranslationPopup")
         self.selection_translation_popup.setVisible(False)
         popup_layout = QVBoxLayout(self.selection_translation_popup)
@@ -1857,10 +1904,27 @@ class MercuryMainWindow(QMainWindow):
             return None
         return self.feed_service.get_reader_document(entry_id)
 
+    def _reader_overlay_parent(self) -> QWidget:
+        viewport = getattr(self.reader, "viewport", None)
+        return viewport() if callable(viewport) else self.reader
+
     def _selected_reader_text(self) -> str:
-        cursor = self.reader.textCursor()
-        # QTextCursor.selectedText uses U+2029 for paragraph separators.
-        return cursor.selectedText().replace("\u2029", "\n").strip()
+        text_cursor = getattr(self.reader, "textCursor", None)
+        if callable(text_cursor):
+            cursor = text_cursor()
+            # QTextCursor.selectedText uses U+2029 for paragraph separators.
+            return cursor.selectedText().replace("\u2029", "\n").strip()
+
+        selected_text = getattr(self.reader, "selectedText", None)
+        if callable(selected_text):
+            return selected_text().replace("\u2029", "\n").strip()
+
+        page_getter = getattr(self.reader, "page", None)
+        page = page_getter() if callable(page_getter) else None
+        page_selected_text = getattr(page, "selectedText", None)
+        if callable(page_selected_text):
+            return page_selected_text().replace("\u2029", "\n").strip()
+        return ""
 
     @Slot()
     def _on_reader_selection_changed(self) -> None:
@@ -1942,17 +2006,22 @@ class MercuryMainWindow(QMainWindow):
 
     def _show_selection_translation_popup(self, text: str) -> None:
         self.selection_translation_body.setText(text)
-        viewport = self.reader.viewport()
+        viewport = self._reader_overlay_parent()
         width = min(360, max(240, viewport.width() - 24))
         self.selection_translation_popup.setFixedWidth(width)
         self.selection_translation_popup.adjustSize()
-        cursor_rect = self.reader.cursorRect(self.reader.textCursor())
-        pos = cursor_rect.bottomRight() + QPoint(12, 12)
+        cursor_rect = None
+        cursor_rect_getter = getattr(self.reader, "cursorRect", None)
+        text_cursor_getter = getattr(self.reader, "textCursor", None)
+        if callable(cursor_rect_getter) and callable(text_cursor_getter):
+            cursor_rect = cursor_rect_getter(text_cursor_getter())
+        pos = cursor_rect.bottomRight() + QPoint(12, 12) if cursor_rect is not None else QPoint(12, 12)
         popup_size = self.selection_translation_popup.sizeHint()
         if pos.x() + popup_size.width() > viewport.width():
             pos.setX(max(8, viewport.width() - popup_size.width() - 8))
         if pos.y() + popup_size.height() > viewport.height():
-            pos.setY(max(8, cursor_rect.top() - popup_size.height() - 12))
+            fallback_y = cursor_rect.top() - popup_size.height() - 12 if cursor_rect is not None else 8
+            pos.setY(max(8, fallback_y))
         self.selection_translation_popup.move(pos)
         self.selection_translation_popup.show()
         self.selection_translation_popup.raise_()

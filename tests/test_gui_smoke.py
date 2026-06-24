@@ -5,6 +5,7 @@ import os
 # pytest-qt creates QApplication before the test body runs, so this must be set
 # while the module is imported, not inside the test function.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("MERCURY_READER_RENDERER", "text")
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
