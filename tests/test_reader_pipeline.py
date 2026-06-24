@@ -10,7 +10,8 @@ from mercury.reader.readability import extract_readable_html
 from mercury.reader.sanitizer import clean_reader_html
 
 
-ARTICLE_HTML = """
+ARTICLE_HTML = """ 
+
 <!doctype html>
 <html>
   <head><title>Mercury Reader Test</title></head>

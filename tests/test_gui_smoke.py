@@ -27,6 +27,7 @@ from mercury.agent.translation.translation_agent import (
 )
 
 
+
 class StubFeedService:
     def __init__(self) -> None:
         self.deleted_feed_batches: list[list[str]] = []

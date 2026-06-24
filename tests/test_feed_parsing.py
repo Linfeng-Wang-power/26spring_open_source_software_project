@@ -3,6 +3,7 @@ from __future__ import annotations
 from mercury.feed import parse_feed_xml, parse_opml
 
 
+
 def test_parse_rss_uses_guid_as_stable_id() -> None:
     title, articles = parse_feed_xml(
         """<?xml version="1.0"?>
