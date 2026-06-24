@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from reader.models import FetchResult
+from mercury.reader.models import FetchResult
 
 
 DEFAULT_USER_AGENT = "MercuryPyQt/0.1 (+local-first RSS reader)"

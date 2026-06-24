@@ -2,14 +2,14 @@
 
 负责人：张洳维  
 测试平台：macOS  
-计划日期：2026-06-04  
+计划日期：2026-06-24  
 参考文档：`PLAN.md`、`AGENTS.md`、`README.md`、`TEST_REPORT.zh.md`
 
 ## 1. 测试目标
 
 本计划用于验证当前已经提交并标记为 Done 的模块能否在 macOS 上正确安装、运行和测试，并形成后续测试记录与汇报材料。
 
-本轮只验收已经完成的四个模块：
+本轮只验收已经完成的四个模块 ：
 
 | Module | Owner | Deliverable | macOS 测试重点 |
 |---|---|---|---|
@@ -364,11 +364,10 @@ PY
 - [v ] 确认 `softvenv` 已安装 `requirements.txt`。
 - [v ] 记录 `softvenv/bin/python --version`、`pip check` 和核心依赖导入结果。
 - [v ] 执行 Feed / Reader / GUI smoke 分组测试。
-- [ ] 执行 Storage 功能测试。
-- [ ] 执行 Storage 无 Qt 依赖隔离测试。
+- [v] 执行 Storage 功能测试。
+- [v] 执行 Storage 无 Qt 依赖隔离测试。
 - [v] 手工启动 `softvenv/bin/python mercury_gui.py` 并截图。
-- [ ] 手工验证 OPML 解析。
-- [ ] 手工验证 Reader Pipeline。
-- [ ] 手工验证默认 `StorageService()` 路径。
-- [ ] 汇总 macOS 与 Windows 测试差异。
-- [ ] 写入 `TEST_REPORT_MAC.zh.md`。
+- [v] 手工验证 OPML 解析。
+- [v] 手工验证 Reader Pipeline。
+- [v] 手工验证默认 `StorageService()` 路径。
+- [v] 写入 `TEST_REPORT_MAC.zh.md`。

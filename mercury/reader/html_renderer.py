@@ -7,7 +7,7 @@ from html import escape
 from bs4 import BeautifulSoup, NavigableString
 from markdown_it import MarkdownIt
 
-from reader.sanitizer import sanitize_html
+from mercury.reader.sanitizer import sanitize_html
 
 
 CLEANED_READER_CSS = """

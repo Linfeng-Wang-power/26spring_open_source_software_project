@@ -7,13 +7,31 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MERCURY_READER_RENDERER", "text")
 
-from PySide6.QtWidgets import QListWidget, QMainWindow, QSplitter, QTextBrowser, QToolBar, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextCursor
+from PySide6.QtWidgets import (
+    QLabel,
+    QListWidget,
+    QMainWindow,
+    QMessageBox,
+    QSplitter,
+    QTextBrowser,
+    QToolBar,
+    QWidget,
+)
 
-from mercury_gui import Article, Feed, MercuryMainWindow
+from mercury.gui import Article, Feed, MercuryMainWindow
+from mercury.agent.translation.translation_agent import (
+    TranslationRequest,
+    TranslationResult,
+    TranslationSegment,
+)
+
 
 
 class StubFeedService:
     def __init__(self) -> None:
+        self.deleted_feed_batches: list[list[str]] = []
         self.feeds = [
             Feed("All Feeds", "internal://all", 2),
             Feed("Starred", "internal://starred", 1),
@@ -80,6 +98,10 @@ class StubFeedService:
     def refresh_all(self) -> None:
         raise AssertionError("unexpected refresh_all call")
 
+    def delete_feeds(self, feed_titles: list[str]) -> None:
+        self.deleted_feed_batches.append(list(feed_titles))
+        self.feeds = [feed for feed in self.feeds if feed.title not in feed_titles]
+
 
 class StubReaderPipeline:
     def render_article_html(self, article: Article) -> str:
@@ -95,8 +117,29 @@ class StubSummaryAgent:
 
 
 class StubTranslationAgent:
-    def translate(self, article: Article, target_language: str = "zh-CN") -> str:
-        return f"translation:{target_language}:{article.title}"
+    class _Template:
+        fingerprint = "stubfp"
+
+    template = _Template()
+
+    def build_model_id(self) -> str:
+        return "stub-model@stubfp"
+
+    def run(self, request: TranslationRequest) -> TranslationResult:
+        return TranslationResult(
+            entry_id=request.entry_id,
+            target_language=request.target_language,
+            segments=(
+                TranslationSegment(
+                    source_text=request.content,
+                    trans_text=f"translation:{request.target_language}:{request.content}",
+                    source_hash="stubhash",
+                    position=0,
+                ),
+            ),
+            model_id=self.build_model_id(),
+            template_fingerprint=self.template.fingerprint,
+        )
 
 
 def build_window() -> MercuryMainWindow:
@@ -167,3 +210,90 @@ def test_main_window_search_filters_visible_article_rows(qtbot) -> None:
 
     assert not article_list.item(0).isHidden()
     assert not article_list.item(1).isHidden()
+
+
+def test_feed_checkboxes_only_show_in_batch_selection_mode(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+
+    engineering_item = window.feed_list.item(2)
+    assert not engineering_item.flags() & Qt.ItemIsUserCheckable
+    assert window.batch_delete_feed_action.text() == "批量选择"
+
+    window.on_batch_delete_feeds()
+
+    engineering_item = window.feed_list.item(2)
+    assert engineering_item.flags() & Qt.ItemIsUserCheckable
+    assert window.batch_delete_feed_action.text() == "删除已选"
+    assert window.cancel_batch_delete_feed_action.isVisible()
+
+    window.on_cancel_batch_delete_feeds()
+
+    engineering_item = window.feed_list.item(2)
+    assert not engineering_item.flags() & Qt.ItemIsUserCheckable
+    assert window.batch_delete_feed_action.text() == "批量选择"
+    assert not window.cancel_batch_delete_feed_action.isVisible()
+
+
+def test_translate_button_runs_translation_worker(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    window.show()
+
+    window.on_translate()
+
+    qtbot.waitUntil(
+        lambda: "翻译完成" in window.summary_text.text(),
+        timeout=2000,
+    )
+    panel = window.findChild(QTextBrowser, "SummaryPanel")
+    assert panel is not None
+    assert "translation:zh-CN" in panel.toPlainText()
+
+
+def test_reader_selection_shows_translation_popup(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    window.show()
+
+    cursor = window.reader.document().find("First paragraph")
+    assert not cursor.isNull()
+    window.reader.setTextCursor(cursor)
+
+    body = window.findChild(QLabel, "SelectionTranslationBody")
+    assert body is not None
+    qtbot.waitUntil(
+        lambda: "translation:zh-CN:First paragraph" in body.text(),
+        timeout=3000,
+    )
+    assert window.selection_translation_popup.isVisible()
+
+
+def test_batch_selection_deletes_checked_feeds_and_exits_mode(qtbot, monkeypatch) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    service = window.feed_service
+
+    window.on_batch_delete_feeds()
+    window.feed_list.item(2).setCheckState(Qt.Checked)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+
+    window.on_batch_delete_feeds()
+
+    assert service.deleted_feed_batches == [["Engineering"]]
+    assert not window.feed_batch_selection_enabled
+    assert window.feed_list.count() == 2
+    assert window.batch_delete_feed_action.text() == "批量选择"
+
+
+def test_switching_to_tags_exits_feed_batch_selection(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+
+    window.on_batch_delete_feeds()
+    window.on_tag_tab()
+
+    assert not window.feed_batch_selection_enabled
+    assert window.current_sidebar_mode == "tags"
+    assert window.batch_delete_feed_action.text() == "批量选择"
+    assert not window.cancel_batch_delete_feed_action.isVisible()

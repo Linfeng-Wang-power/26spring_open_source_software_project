@@ -7,12 +7,12 @@ from typing import Any
 
 import httpx
 
-from reader.fetcher import SourceHtmlFetcher
-from reader.html_renderer import render_markdown_to_reader_html
-from reader.markdown_converter import html_to_markdown
-from reader.models import ReaderDocument
-from reader.readability import extract_readable_html
-from reader.sanitizer import clean_reader_html
+from mercury.reader.fetcher import SourceHtmlFetcher
+from mercury.reader.html_renderer import render_markdown_to_reader_html
+from mercury.reader.markdown_converter import html_to_markdown
+from mercury.reader.models import FetchResult, ReaderDocument
+from mercury.reader.readability import extract_readable_html
+from mercury.reader.sanitizer import clean_reader_html
 
 
 @dataclass(frozen=True)
@@ -82,8 +82,12 @@ class ReaderPipelineService:
             return f"当前文章没有可抓取的 URL：{getattr(article, 'title', 'Untitled')}"
 
         document = self.fetch_and_process(url)
-        return (
-            f"已清洗：{document.title}\n\n"
-            f"cleaned_html：{len(document.cleaned_html)} 字符\n"
-            f"canonical_markdown：{len(document.canonical_markdown)} 字符"
-        )
+        return _format_clean_summary(document)
+
+
+def _format_clean_summary(document: ReaderDocument) -> str:
+    return (
+        f"已清洗：{document.title}\n\n"
+        f"cleaned_html：{len(document.cleaned_html)} 字符\n"
+        f"canonical_markdown：{len(document.canonical_markdown)} 字符"
+    )

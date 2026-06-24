@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from bs4.element import Tag
 from readability import Document
 
-from reader.models import ReadabilityResult
+from mercury.reader.models import ReadabilityResult
 
 NO_TITLE = "[no-title]"
 

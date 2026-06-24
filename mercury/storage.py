@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 from yoyo import get_backend, read_migrations
 
-from mercury_feed import (
+from mercury.feed import (
     Article,
     Feed,
     FeedParseError,
@@ -32,7 +32,7 @@ from mercury_feed import (
     parse_feed_xml,
     parse_opml,
 )
-from reader.models import ReaderDocument
+from mercury.reader.models import ReaderDocument
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -258,7 +258,7 @@ class EntryStore:
             f"""SELECT entry_id, feed_id, stable_id, title, author, url,
                        published, summary, is_starred, is_unread
                 FROM entries {where}
-                ORDER BY published DESC""",
+                ORDER BY published DESC, entry_id""",
             params,
         ).fetchall()
         return [EntryRow(**dict(row)) for row in rows]
@@ -321,7 +321,7 @@ class EntryStore:
                 FROM entries
                 JOIN tags ON tags.entry_id = entries.entry_id
                 WHERE {' AND '.join(clauses)}
-                ORDER BY entries.published DESC""",
+                ORDER BY entries.published DESC, entries.entry_id""",
             params,
         ).fetchall()
         return [EntryRow(**dict(row)) for row in rows]
@@ -401,25 +401,76 @@ class ContentStore:
 class SummaryStore:
     """Storage interface for Summary Agent results.
 
-    Schema is live (migration 0003).  Implementation to be filled in by 陆骏凯.
+    Backed by the ``summary_results`` table (migration 0003). Failures must NOT
+    overwrite an existing successful result, so ``save_result`` rejects empty
+    summary text.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def save_result(self, entry_id: str, summary_text: str, model_id: str = "") -> None:
-        """Persist a successful summary result; overwrites any previous result."""
-        raise NotImplementedError
+        """Persist a successful summary result; overwrites any previous result.
+
+        Empty *summary_text* is rejected so a cancelled or failed run cannot
+        wipe an earlier success.
+        """
+        if not summary_text or not summary_text.strip():
+            raise ValueError("summary_text must not be empty")
+        if not entry_id:
+            raise ValueError("entry_id must not be empty")
+        self._conn.execute(
+            """INSERT OR REPLACE INTO summary_results
+               (entry_id, summary_text, model_id, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (entry_id, summary_text, model_id, _now()),
+        )
+        self._conn.commit()
 
     def get(self, entry_id: str) -> str | None:
         """Return the cached summary text, or None if not yet generated."""
-        raise NotImplementedError
+        if not entry_id:
+            return None
+        row = self._conn.execute(
+            "SELECT summary_text FROM summary_results WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        text = row["summary_text"]
+        return text or None
+
+    def get_metadata(self, entry_id: str) -> dict | None:
+        """Return ``{summary_text, model_id, created_at}`` or None."""
+        if not entry_id:
+            return None
+        row = self._conn.execute(
+            """SELECT summary_text, model_id, created_at
+               FROM summary_results WHERE entry_id = ?""",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "summary_text": row["summary_text"],
+            "model_id": row["model_id"],
+            "created_at": row["created_at"],
+        }
+
+    def delete(self, entry_id: str) -> None:
+        """Remove a stored summary (used for manual clear)."""
+        self._conn.execute(
+            "DELETE FROM summary_results WHERE entry_id = ?", (entry_id,)
+        )
+        self._conn.commit()
 
 
 class TranslationStore:
     """Storage interface for Translation Agent segment results.
 
-    Schema is live (migration 0003).  Implementation to be filled in by 张睿桐.
+    Backed by ``translation_segments`` (migration 0003). Results are stored as
+    a full replacement for one entry + target language so stale segments cannot
+    survive after re-translation.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -436,13 +487,76 @@ class TranslationStore:
         Each dict in *segments* must have keys:
         ``source_hash``, ``source_text``, ``trans_text``, ``position``.
         """
-        raise NotImplementedError
+        if not entry_id:
+            raise ValueError("entry_id must not be empty")
+        if not target_lang or not target_lang.strip():
+            raise ValueError("target_lang must not be empty")
+        if not segments:
+            raise ValueError("segments must not be empty")
+
+        normalized: list[dict] = []
+        for index, segment in enumerate(segments):
+            source_text = str(segment.get("source_text") or "").strip()
+            trans_text = str(segment.get("trans_text") or "").strip()
+            source_hash = str(segment.get("source_hash") or "").strip()
+            position = int(segment.get("position", index))
+            if not source_text:
+                raise ValueError("source_text must not be empty")
+            if not trans_text:
+                raise ValueError("trans_text must not be empty")
+            if not source_hash:
+                raise ValueError("source_hash must not be empty")
+            normalized.append(
+                {
+                    "segment_id": f"{entry_id}:{target_lang}:{position}:{source_hash}",
+                    "source_hash": source_hash,
+                    "source_text": source_text,
+                    "trans_text": trans_text,
+                    "position": position,
+                }
+            )
+
+        with self._conn:
+            self._conn.execute(
+                """DELETE FROM translation_segments
+                   WHERE entry_id = ? AND target_lang = ?""",
+                (entry_id, target_lang),
+            )
+            self._conn.executemany(
+                """INSERT INTO translation_segments
+                   (segment_id, entry_id, source_hash, source_text, trans_text,
+                    target_lang, position, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        segment["segment_id"],
+                        entry_id,
+                        segment["source_hash"],
+                        segment["source_text"],
+                        segment["trans_text"],
+                        target_lang,
+                        segment["position"],
+                        _now(),
+                    )
+                    for segment in normalized
+                ],
+            )
 
     def get_segments(
         self, entry_id: str, target_lang: str = "zh-CN"
     ) -> list[dict]:
         """Return translated segments ordered by position, or [] if not cached."""
-        raise NotImplementedError
+        if not entry_id or not target_lang:
+            return []
+        rows = self._conn.execute(
+            """SELECT segment_id, entry_id, source_hash, source_text, trans_text,
+                      target_lang, position, created_at
+               FROM translation_segments
+               WHERE entry_id = ? AND target_lang = ?
+               ORDER BY position ASC""",
+            (entry_id, target_lang),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 class ProviderStore:

@@ -1,4 +1,4 @@
-"""Tests for mercury_storage.py.
+"""Tests for mercury.storage.
 
 Covers: migrations, FeedStore, EntryStore, ContentStore, SettingsStore,
 and StorageService public interface.
@@ -9,11 +9,12 @@ never touch the real ~/.mercury_pyqt/mercury.db.
 
 from __future__ import annotations
 
+
 import pytest
 from pathlib import Path
 
-from mercury_feed import Article
-from mercury_storage import (
+from mercury.feed import Article
+from mercury.storage import (
     ContentStore,
     EntryStore,
     FeedStore,
@@ -22,7 +23,7 @@ from mercury_storage import (
     apply_migrations,
     get_connection,
 )
-from reader.models import ReaderDocument
+from mercury.reader.models import ReaderDocument
 
 
 # ---------------------------------------------------------------------------
@@ -477,9 +478,24 @@ def test_storage_service_tag_operations(svc):
 
 
 def test_no_qt_import():
-    """mercury_storage must not import any Qt module."""
+    """mercury.storage must not import any Qt module.
+
+    Run in a fresh subprocess so plugins like pytest-qt that pre-import
+    PySide6 cannot taint sys.modules.
+    """
+    import subprocess
     import sys
-    import importlib
-    # Re-check sys.modules after import
-    qt_mods = [m for m in sys.modules if "PySide" in m or "PyQt" in m]
-    assert qt_mods == [], f"Unexpected Qt modules: {qt_mods}"
+
+    code = (
+        "import sys; import mercury.storage; "
+        "qt = [m for m in sys.modules if 'PySide' in m or 'PyQt' in m]; "
+        "print(qt)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    qt_mods = result.stdout.strip()
+    assert qt_mods == "[]", f"Unexpected Qt modules: {qt_mods}"

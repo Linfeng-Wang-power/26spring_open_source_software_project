@@ -16,7 +16,7 @@
 set -euo pipefail
 
 APP_NAME="Lumen"
-ENTRY="mercury_gui.py"
+ENTRY="run_lumen.py"
 DMG_OUT="dist/${APP_NAME}.dmg"
 STAGING_DIR="dist/dmg_staging"
 VENV_DIR=".venv_build"
@@ -82,8 +82,8 @@ echo "→ 运行 PyInstaller…"
     --windowed \
     --noconfirm \
     --clean \
-    --add-data "migrations:migrations" \
-    --add-data "reader:reader" \
+    --add-data "mercury/migrations:mercury/migrations" \
+    --add-data "mercury/resources:mercury/resources" \
     --collect-all "setuptools" \
     --collect-all "yoyo" \
     --collect-all "importlib_metadata" \

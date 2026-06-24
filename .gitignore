@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 
+# macOS
+.DS_Store
+
 # PyInstaller build artifacts
 build/
 dist/
