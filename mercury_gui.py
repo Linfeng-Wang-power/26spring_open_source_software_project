@@ -9,6 +9,7 @@ Install GUI dependency if needed:
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -17,8 +18,8 @@ from typing import Protocol
 import httpx
 
 try:
-    from PySide6.QtCore import QObject, Qt, QThread, QSize, Signal, Slot
-    from PySide6.QtGui import QAction, QFont, QIcon, QImage, QTextDocument
+    from PySide6.QtCore import QObject, Qt, QThread, QSize, QUrl, Signal, Slot
+    from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QImage, QTextDocument
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -48,6 +49,13 @@ except ModuleNotFoundError as exc:
 from mercury_storage import StorageService
 from reader import ReaderPipelineService
 from reader.models import ReaderDocument
+
+try:
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except ModuleNotFoundError:
+    QWebEnginePage = None
+    QWebEngineView = None
 
 
 # -----------------------------
@@ -218,6 +226,43 @@ class ReaderTextBrowser(QTextBrowser):
 
         self._image_cache[url] = image
         return image
+
+
+if QWebEnginePage is not None and QWebEngineView is not None:
+
+    class ReaderWebEnginePage(QWebEnginePage):
+        """Reader page that sends external links to the system browser."""
+
+        def acceptNavigationRequest(self, url: QUrl, navigation_type: object, is_main_frame: bool) -> bool:
+            link_clicked = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+            if navigation_type == link_clicked and url.scheme() in {"http", "https", "mailto"}:
+                QDesktopServices.openUrl(url)
+                return False
+            return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
+
+
+    class ReaderWebEngineView(QWebEngineView):
+        """Browser-backed reader view with full CSS support."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.setPage(ReaderWebEnginePage(self))
+
+        def setHtml(self, html: str, base_url: QUrl | None = None) -> None:
+            super().setHtml(html, base_url or QUrl("about:blank"))
+
+
+else:
+    ReaderWebEngineView = None
+
+
+def create_reader_view() -> QWidget:
+    """Create the best available reader renderer."""
+
+    requested_renderer = os.environ.get("MERCURY_READER_RENDERER", "webengine").strip().lower()
+    if requested_renderer != "text" and ReaderWebEngineView is not None:
+        return ReaderWebEngineView()
+    return ReaderTextBrowser()
 
 
 class CleanArticleWorker(QObject):
@@ -899,9 +944,10 @@ class MercuryMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.reader = ReaderTextBrowser()
+        self.reader = create_reader_view()
         self.reader.setObjectName("Reader")
-        self.reader.setOpenExternalLinks(True)
+        if isinstance(self.reader, QTextBrowser):
+            self.reader.setOpenExternalLinks(True)
         layout.addWidget(self.reader, 1)
         return panel
 

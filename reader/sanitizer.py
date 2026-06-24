@@ -119,6 +119,18 @@ def _best_image_url(tag: object) -> str:
         candidate = _first_srcset_url(str(value)) if value else ""
         if candidate:
             return candidate
+
+    parent = getattr(tag, "parent", None)
+    while parent is not None:
+        if getattr(parent, "name", "") == "picture":
+            for source in parent.find_all("source"):
+                for attr in ("srcset", "data-srcset"):
+                    value = source.get(attr)
+                    candidate = _first_srcset_url(str(value)) if value else ""
+                    if candidate:
+                        return candidate
+            break
+        parent = getattr(parent, "parent", None)
     return ""
 
 
