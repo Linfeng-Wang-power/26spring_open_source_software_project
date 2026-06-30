@@ -2314,7 +2314,7 @@ class MercuryMainWindow(QMainWindow):
         self._start_selection_translation(text)
 
     def _start_selection_translation(self, text: str) -> None:
-        target_lang = self._resolve_summary_language()
+        target_lang = self._resolve_translation_language()
         cache_key = (target_lang, text)
         if cache_key in self.selection_translation_cache:
             self._show_selection_translation_popup(
@@ -2399,7 +2399,7 @@ class MercuryMainWindow(QMainWindow):
             return
         selected = self.selection_translation_pending_text.strip()
         if selected:
-            self.selection_translation_cache[(self._resolve_target_language(), selected)] = translated
+            self.selection_translation_cache[(self._resolve_translation_language(), selected)] = translated
         self._show_selection_translation_popup(translated)
 
     @Slot(int, str)

@@ -460,6 +460,27 @@ def test_reader_selection_shows_translation_popup(qtbot) -> None:
     assert window.selection_translation_popup.isVisible()
 
 
+def test_reader_selection_uses_translation_language_not_summary_language(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    window.show()
+
+    window.summary_lang_combo.setCurrentIndex(window.summary_lang_combo.findData("en"))
+    window.translation_lang_combo.setCurrentIndex(window.translation_lang_combo.findData("ja"))
+
+    cursor = window.reader.document().find("First paragraph")
+    assert not cursor.isNull()
+    window.reader.setTextCursor(cursor)
+
+    body = window.findChild(QLabel, "SelectionTranslationBody")
+    assert body is not None
+    qtbot.waitUntil(
+        lambda: "translation:ja:First paragraph" in body.text(),
+        timeout=3000,
+    )
+    assert "translation:en:First paragraph" not in body.text()
+
+
 def test_batch_selection_deletes_checked_feeds_and_exits_mode(qtbot, monkeypatch) -> None:
     window = build_window()
     qtbot.addWidget(window)
