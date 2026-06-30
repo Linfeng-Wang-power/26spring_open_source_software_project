@@ -86,8 +86,8 @@ source .venv/bin/activate
 或使用 conda：
 
 ```bash
-conda create -n mercury python=3.11
-conda activate mercury
+conda create -n lumen python=3.11
+conda activate lumen
 ```
 
 ### 3. 安装依赖
@@ -105,7 +105,7 @@ pip install -r requirements.txt
 推荐方式：
 
 ```bash
-python -m mercury
+python -m lumen
 ```
 
 也可以使用打包入口脚本：
@@ -119,13 +119,13 @@ python run_lumen.py
 默认本地数据目录：
 
 ```text
-~/.mercury_pyqt/
+~/.lumen_pyqt/
 ```
 
 默认数据库文件：
 
 ```text
-~/.mercury_pyqt/mercury.db
+~/.lumen_pyqt/lumen.db
 ```
 
 数据库中保存订阅源、文章、标签、清洗缓存、摘要结果、翻译结果和基础设置。API Key 不应写入 SQLite，项目会优先通过系统 keyring 保存。
@@ -394,7 +394,7 @@ Reader 清洗会尽量修复相对链接、懒加载图片地址和 `srcset` 图
 ## 项目结构
 
 ```text
-mercury/
+lumen/
   app/                 应用入口
   agent/               摘要、翻译、Provider、Prompt 模板
   reader/              原文抓取、清洗、Markdown 转换、Reader 渲染
