@@ -44,11 +44,13 @@ class TranslationWorker(QObject):
         agent: TranslationAgent,
         request: TranslationRequest,
         job: TranslationJob,
+        completed_source_hashes: set[str] | None = None,
     ) -> None:
         super().__init__()
         self._agent = agent
         self._request = request
         self._job = job
+        self._completed_source_hashes = completed_source_hashes or set()
         self._cancel = threading.Event()
 
     @Slot()
@@ -68,6 +70,9 @@ class TranslationWorker(QObject):
 
             translated: list[TranslationSegment] = []
             for index, source in enumerate(source_segments, start=1):
+                if source.source_hash in self._completed_source_hashes:
+                    self.progress.emit(job_id, entry_id, index, total)
+                    continue
                 if self._cancel.is_set():
                     self.cancelled.emit(job_id, entry_id)
                     return
@@ -99,9 +104,9 @@ class TranslationWorker(QObject):
                         source_text=segment.source_text,
                         trans_text=segment.trans_text,
                         source_hash=segment.source_hash,
-                        position=index,
+                        position=segment.position,
                     )
-                    for index, segment in enumerate(translated)
+                    for segment in translated
                 ),
                 model_id=self._agent.build_model_id(),
                 template_fingerprint=self._agent.template.fingerprint,

@@ -140,26 +140,32 @@ def _clean_figure(tag: Tag) -> Tag | None:
 
 
 def _best_figure_image_url(figure: Tag, image: Tag | None) -> str:
+    candidates: list[tuple[int, str]] = []
     if image is not None:
         for attr in ("src", "data-src", "data-original", "data-lazy-src", "data-url"):
             value = image.get(attr)
             candidate = _normalize_image_url(str(value), 1024) if value else ""
             if candidate:
-                return candidate
+                candidates.append((1024, candidate))
         for attr in ("srcset", "data-srcset"):
-            candidate = _best_srcset_url(str(image.get(attr, "")))
-            if candidate:
-                return candidate
+            candidates.extend(_srcset_candidates(str(image.get(attr, ""))))
 
     for source in figure.find_all("source"):
         for attr in ("srcset", "data-srcset"):
-            candidate = _best_srcset_url(str(source.get(attr, "")))
-            if candidate:
-                return candidate
-    return ""
+            candidates.extend(_srcset_candidates(str(source.get(attr, ""))))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda candidate: candidate[0])[1]
 
 
 def _best_srcset_url(srcset: str) -> str:
+    candidates = _srcset_candidates(srcset)
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
+def _srcset_candidates(srcset: str) -> list[tuple[int, str]]:
     candidates: list[tuple[int, str]] = []
     for item in srcset.split(","):
         parts = item.strip().split()
@@ -172,19 +178,23 @@ def _best_srcset_url(srcset: str) -> str:
         candidate = _normalize_image_url(parts[0], width or 1024)
         if candidate:
             candidates.append((width, candidate))
-    if not candidates:
-        return ""
-    return max(candidates, key=lambda candidate: candidate[0])[1]
+    return candidates
 
 
 def _normalize_image_url(url: str, width: int) -> str:
     stripped = url.strip()
-    if not stripped or stripped.startswith("data:"):
+    if not stripped or stripped.startswith("data:") or _is_placeholder_image_url(stripped):
         return ""
     chosen_width = max(width, 640)
     stripped = stripped.replace("{width}", str(chosen_width))
     stripped = stripped.replace("{height}", "0")
     return stripped if "{" not in stripped and "}" not in stripped else ""
+
+
+def _is_placeholder_image_url(url: str) -> bool:
+    lowered = url.strip().lower()
+    markers = ("placeholder", "spacer", "transparent", "blank.gif", "1x1", "pixel")
+    return any(marker in lowered for marker in markers)
 
 
 def _caption_alt(caption_text: str) -> str:

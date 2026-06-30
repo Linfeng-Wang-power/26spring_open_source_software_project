@@ -7,7 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MERCURY_READER_RENDERER", "text")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QLabel,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import mercury.gui as gui_module
 from mercury.gui import Article, Feed, MercuryMainWindow
 from mercury.agent.translation.translation_agent import (
     TranslationRequest,
@@ -101,6 +102,25 @@ class StubFeedService:
     def delete_feeds(self, feed_titles: list[str]) -> None:
         self.deleted_feed_batches.append(list(feed_titles))
         self.feeds = [feed for feed in self.feeds if feed.title not in feed_titles]
+
+    def set_article_unread(self, entry_id: str, unread: bool) -> None:
+        self.articles = [
+            Article(
+                title=article.title,
+                feed_title=article.feed_title,
+                author=article.author,
+                published=article.published,
+                url=article.url,
+                summary=article.summary,
+                markdown=article.markdown,
+                stable_id=article.stable_id,
+                entry_id=article.entry_id,
+                tags=article.tags,
+                starred=article.starred,
+                unread=unread if article.entry_id == entry_id else article.unread,
+            )
+            for article in self.articles
+        ]
 
 
 class StubReaderPipeline:
@@ -191,6 +211,87 @@ def test_main_window_loads_feeds_articles_and_reader_content(qtbot) -> None:
     assert "First macOS article" in reader.toPlainText()
 
 
+def test_reader_source_link_stays_inside_app(qtbot, monkeypatch) -> None:
+    opened_urls = []
+
+    def fake_open_url(url: QUrl) -> bool:
+        opened_urls.append(url.toString())
+        return True
+
+    monkeypatch.setattr(gui_module.QDesktopServices, "openUrl", fake_open_url)
+
+    window = build_window()
+    qtbot.addWidget(window)
+    loaded_urls = []
+
+    class FakeInternalBrowser(QWidget):
+        def load(self, url: QUrl) -> None:
+            loaded_urls.append(url.toString())
+
+    window.reader = FakeInternalBrowser()
+    window._open_reader_source_url(QUrl("https://example.test/article"))
+
+    assert opened_urls == []
+    assert loaded_urls == ["https://example.test/article"]
+    assert not window.reader_nav.isHidden()
+    assert window.original_source_url == "https://example.test/article"
+    assert "正在打开原文" in window.summary_text.text()
+
+
+def test_agent_panels_can_be_resized_compactly(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+
+    assert window.summary_panel.minimumHeight() <= 32
+    assert window.translation_panel.minimumHeight() <= 32
+    assert window.summary_panel_frame.minimumHeight() <= 64
+    assert window.translation_panel_frame.minimumHeight() <= 64
+    assert window.agent_panel_splitter.childrenCollapsible()
+    assert window.agent_panel_splitter.isCollapsible(0)
+    assert window.agent_panel_splitter.isCollapsible(1)
+
+
+def test_more_filters_menu_replaces_placeholder_dialog(qtbot, monkeypatch) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    shown_dialogs = []
+
+    def fake_dialog(*args, **kwargs) -> None:
+        shown_dialogs.append((args, kwargs))
+
+    monkeypatch.setattr(window, "_show_interface_dialog", fake_dialog)
+
+    menu = window._build_more_filters_menu()
+
+    assert shown_dialogs == []
+    assert [action.text() for action in menu.actions()] == ["显示全部", "只看未读", "只看星标", "清除搜索"]
+
+
+def test_agent_panels_collapse_when_both_closed(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    qtbot.waitUntil(window.isVisible, timeout=2000)
+
+    window._render_summary_panel("summary")
+    window._auto_expand_agent_panel()
+    window._render_translation_panel("translation")
+    window._auto_expand_agent_panel()
+
+    assert window.summary_panel_expanded
+    assert window.agent_panel_splitter.isVisible()
+
+    window.on_close_summary_panel()
+    assert window.summary_panel_expanded
+
+    window.on_close_translation_panel()
+
+    assert not window.summary_panel_expanded
+    assert not window.agent_panel_splitter.isVisible()
+    assert window.vertical_splitter.sizes()[1] <= 70
+
+
 def test_main_window_search_filters_visible_article_rows(qtbot) -> None:
     window = build_window()
     qtbot.addWidget(window)
@@ -210,6 +311,77 @@ def test_main_window_search_filters_visible_article_rows(qtbot) -> None:
 
     assert not article_list.item(0).isHidden()
     assert not article_list.item(1).isHidden()
+
+
+def test_unread_filter_keeps_tag_mode(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+
+    window.on_tag_tab()
+    tag_item = window.feed_list.findItems("macOS (1)", Qt.MatchExactly)[0]
+    window.feed_list.setCurrentItem(tag_item)
+
+    assert window.current_sidebar_mode == "tags"
+    assert window.current_tag == "macOS"
+
+    window.unread_filter_btn.setChecked(True)
+    window.on_unread_filter()
+
+    assert window.current_sidebar_mode == "tags"
+    assert window.current_tag == "macOS"
+    assert window.current_feed_title is None
+    assert window.article_scope_label.text() == "Tag: macOS · 未读"
+
+
+def test_unread_filter_keeps_tag_mode_after_auto_mark_read(qtbot) -> None:
+    service = StubFeedService()
+    first = service.articles[0]
+    service.articles[0] = Article(
+        title=first.title,
+        feed_title=first.feed_title,
+        author=first.author,
+        published=first.published,
+        url=first.url,
+        summary=first.summary,
+        markdown=first.markdown,
+        stable_id=first.stable_id,
+        entry_id="entry-first",
+        tags=first.tags,
+        starred=first.starred,
+        unread=True,
+    )
+    window = MercuryMainWindow(
+        feed_service=service,
+        reader_pipeline=StubReaderPipeline(),
+        summary_agent=StubSummaryAgent(),
+        translation_agent=StubTranslationAgent(),
+    )
+    qtbot.addWidget(window)
+
+    window.on_tag_tab()
+    tag_item = window.feed_list.findItems("macOS (1)", Qt.MatchExactly)[0]
+    window.feed_list.setCurrentItem(tag_item)
+    window.unread_filter_btn.setChecked(True)
+    window.on_unread_filter()
+
+    assert window.current_sidebar_mode == "tags"
+    assert window.current_tag == "macOS"
+    assert window.current_feed_title is None
+    assert window.sidebar_title.text() == "Tags"
+
+
+def test_reader_original_status_updates_on_load_and_back(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+
+    window._enter_reader_original_mode(QUrl("https://example.test/first"))
+    window._on_reader_load_finished(True)
+
+    assert "已打开原文" in window.summary_text.text()
+
+    window.on_reader_back()
+
+    assert "已打开：First macOS article" in window.summary_text.text()
 
 
 def test_feed_checkboxes_only_show_in_batch_selection_mode(qtbot) -> None:
@@ -246,9 +418,28 @@ def test_translate_button_runs_translation_worker(qtbot) -> None:
         lambda: "翻译完成" in window.summary_text.text(),
         timeout=2000,
     )
-    panel = window.findChild(QTextBrowser, "SummaryPanel")
+    panel = window.findChild(QTextBrowser, "TranslationPanel")
     assert panel is not None
     assert "translation:zh-CN" in panel.toPlainText()
+
+
+def test_summary_and_translation_languages_are_independent(qtbot) -> None:
+    window = build_window()
+    qtbot.addWidget(window)
+
+    window.summary_lang_combo.setCurrentIndex(window.summary_lang_combo.findData("en"))
+    window.translation_lang_combo.setCurrentIndex(window.translation_lang_combo.findData("ja"))
+
+    assert window._resolve_summary_language() == "en"
+    assert window._resolve_translation_language() == "ja"
+
+    window.on_translate()
+    qtbot.waitUntil(
+        lambda: "翻译完成" in window.summary_text.text(),
+        timeout=2000,
+    )
+
+    assert "translation:ja" in window.translation_panel.toPlainText()
 
 
 def test_reader_selection_shows_translation_popup(qtbot) -> None:

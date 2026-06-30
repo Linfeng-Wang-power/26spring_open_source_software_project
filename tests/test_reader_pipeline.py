@@ -64,7 +64,7 @@ def test_sanitizer_promotes_lazy_image_urls() -> None:
     )
 
     assert 'src="https://example.test/lazy.png"' in cleaned
-    assert 'src="https://example.test/small.png"' in cleaned
+    assert 'src="https://example.test/large.png"' in cleaned
     assert "data-src" not in cleaned
     assert "srcset" not in cleaned
 
@@ -307,6 +307,63 @@ def test_renderer_removes_near_duplicate_heading() -> None:
     )
 
     assert html.count("Calls for justice ahead") == 1
+
+
+def test_renderer_converts_article_like_code_block_to_paragraphs() -> None:
+    html = render_markdown_to_reader_html(
+        "    Yesterday we finally merged vector sets into Redis, here you can find the README that explains in detail what you get:\n"
+        "    \n"
+        "    https://github.com/redis/redis/blob/unstable/modules/vector-sets/README.md\n"
+        "    \n"
+        "    The goal of the new data structure is, in short, to create a new Set alike data type.",
+        title="Vector Sets are part of Redis",
+    )
+
+    assert "<pre" not in html
+    assert "Yesterday we finally merged vector sets into Redis" in html
+    assert "The goal of the new data structure" in html
+
+
+def test_markdown_converter_dedents_multi_paragraph_article_prose() -> None:
+    markdown = html_to_markdown(
+        "<pre>"
+        "Yesterday we finally merged vector sets into Redis, here you can find the README that explains in detail what you get:\n\n"
+        "https://github.com/redis/redis/blob/unstable/modules/vector-sets/README.md\n\n"
+        "The goal of the new data structure is, in short, to create a new Set alike data type."
+        "</pre>"
+    )
+
+    assert "    Yesterday" not in markdown
+    assert "Yesterday we finally merged vector sets into Redis" in markdown
+    assert "https://github.com/redis/redis/blob/unstable/modules/vector-sets/README.md" in markdown
+
+
+def test_pipeline_skips_placeholder_image_when_picture_has_real_source() -> None:
+    document = ReaderPipelineService().process_source_html(
+        """
+        <!doctype html>
+        <html>
+          <head><title>Image fallback</title></head>
+          <body>
+            <article>
+              <h1>Image fallback</h1>
+              <figure>
+                <picture>
+                  <source srcset="/images/story-small.jpg 320w, /images/story-large.jpg 1280w">
+                  <img src="/images/placeholder.gif" alt="Story image">
+                </picture>
+              </figure>
+              <p>This is a useful article paragraph with enough content to be selected by the reader.</p>
+              <p>This is another useful article paragraph with enough content to be selected by the reader.</p>
+            </article>
+          </body>
+        </html>
+        """,
+        source_url="https://example.test/news/post",
+    )
+
+    assert "https://example.test/images/story-large.jpg" in document.canonical_markdown
+    assert "placeholder.gif" not in document.canonical_markdown
 
 
 def test_pipeline_uses_picture_source_when_img_has_no_src() -> None:

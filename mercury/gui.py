@@ -13,6 +13,7 @@ import os
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
+from html import escape
 from typing import Protocol
 
 import httpx
@@ -41,6 +42,7 @@ try:
         QPushButton,
         QSizePolicy,
         QSplitter,
+        QScrollArea,
         QTextBrowser,
         QToolBar,
         QToolButton,
@@ -234,14 +236,107 @@ class ReaderTextBrowser(QTextBrowser):
         return image
 
 
+class ResizablePopupFrame(QFrame):
+    """Small child popup that can be resized by dragging its edges."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._resize_margin = 8
+        self._resizing = False
+        self._resize_edges: set[str] = set()
+        self._drag_start = QPoint()
+        self._start_geometry = None
+        self.setMouseTracking(True)
+        self.setMinimumSize(240, 120)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            edges = self._edges_at(event.position().toPoint())
+            if edges:
+                self._resizing = True
+                self._resize_edges = edges
+                self._drag_start = event.globalPosition().toPoint()
+                self._start_geometry = self.geometry()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        point = event.position().toPoint()
+        if self._resizing and self._start_geometry is not None:
+            delta = event.globalPosition().toPoint() - self._drag_start
+            rect = self._start_geometry
+            x, y, width, height = rect.x(), rect.y(), rect.width(), rect.height()
+            min_width = self.minimumWidth()
+            min_height = self.minimumHeight()
+            parent = self.parentWidget()
+            max_width = parent.width() - 12 if parent is not None else 900
+            max_height = parent.height() - 12 if parent is not None else 700
+            if "right" in self._resize_edges:
+                width = max(min_width, min(max_width, rect.width() + delta.x()))
+            if "bottom" in self._resize_edges:
+                height = max(min_height, min(max_height, rect.height() + delta.y()))
+            if "left" in self._resize_edges:
+                width = max(min_width, min(max_width, rect.width() - delta.x()))
+                x = rect.right() - width + 1
+            if "top" in self._resize_edges:
+                height = max(min_height, min(max_height, rect.height() - delta.y()))
+                y = rect.bottom() - height + 1
+            self.setGeometry(x, y, width, height)
+            event.accept()
+            return
+        self._apply_resize_cursor(self._edges_at(point))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._resizing = False
+        self._resize_edges = set()
+        self._start_geometry = None
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if not self._resizing:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    def _edges_at(self, point: QPoint) -> set[str]:
+        edges: set[str] = set()
+        if point.x() <= self._resize_margin:
+            edges.add("left")
+        elif point.x() >= self.width() - self._resize_margin:
+            edges.add("right")
+        if point.y() <= self._resize_margin:
+            edges.add("top")
+        elif point.y() >= self.height() - self._resize_margin:
+            edges.add("bottom")
+        return edges
+
+    def _apply_resize_cursor(self, edges: set[str]) -> None:
+        if {"left", "top"} <= edges or {"right", "bottom"} <= edges:
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif {"right", "top"} <= edges or {"left", "bottom"} <= edges:
+            self.setCursor(Qt.SizeBDiagCursor)
+        elif "left" in edges or "right" in edges:
+            self.setCursor(Qt.SizeHorCursor)
+        elif "top" in edges or "bottom" in edges:
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+
+
 if QWebEnginePage is not None and QWebEngineView is not None:
 
     class ReaderWebEnginePage(QWebEnginePage):
-        """Reader page that sends external links to the system browser."""
+        """Reader page that keeps article links inside the reader."""
+
+        originalLinkRequested = Signal(QUrl)
 
         def acceptNavigationRequest(self, url: QUrl, navigation_type: object, is_main_frame: bool) -> bool:
             link_clicked = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
-            if navigation_type == link_clicked and url.scheme() in {"http", "https", "mailto"}:
+            if navigation_type == link_clicked and is_main_frame and url.scheme() in {"http", "https"}:
+                self.originalLinkRequested.emit(url)
+                return True
+            if navigation_type == link_clicked and url.scheme() == "mailto":
                 QDesktopServices.openUrl(url)
                 return False
             return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
@@ -250,12 +345,20 @@ if QWebEnginePage is not None and QWebEngineView is not None:
     class ReaderWebEngineView(QWebEngineView):
         """Browser-backed reader view with full CSS support."""
 
+        originalNavigationStarted = Signal(QUrl)
+
         def __init__(self) -> None:
             super().__init__()
-            self.setPage(ReaderWebEnginePage(self))
+            page = ReaderWebEnginePage(self)
+            page.originalLinkRequested.connect(self.openOriginalUrl)
+            self.setPage(page)
 
         def setHtml(self, html: str, base_url: QUrl | None = None) -> None:
             super().setHtml(html, base_url or QUrl("about:blank"))
+
+        @Slot(QUrl)
+        def openOriginalUrl(self, url: QUrl) -> None:
+            QTimer.singleShot(0, lambda link=QUrl(url): self.originalNavigationStarted.emit(link))
 
 
 else:
@@ -336,6 +439,87 @@ class RefreshFeedsWorker(QObject):
             self.finished.emit(getattr(service, "last_error", "") or "")
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class ImportOpmlWorker(QObject):
+    """Import OPML away from the GUI thread."""
+
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, feed_service: FeedService, path: str) -> None:
+        super().__init__()
+        self.feed_service = feed_service
+        self.path = path
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            service = self.feed_service
+            if hasattr(service, "create_worker_copy"):
+                service = service.create_worker_copy()
+            service.import_opml(self.path)
+            self.finished.emit(self.path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class AddFeedWorker(QObject):
+    """Add one feed away from the GUI thread."""
+
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, feed_service: FeedService, url: str) -> None:
+        super().__init__()
+        self.feed_service = feed_service
+        self.url = url
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            service = self.feed_service
+            if hasattr(service, "create_worker_copy"):
+                service = service.create_worker_copy()
+            service.add_feed(self.url)
+            self.finished.emit(self.url)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ArticleTagWorker(QObject):
+    """Add or remove one article tag away from the GUI thread."""
+
+    finished = Signal(str, str, str)
+    failed = Signal(str, str)
+
+    def __init__(
+        self,
+        feed_service: FeedService,
+        *,
+        action: str,
+        entry_id: str,
+        tag: str,
+    ) -> None:
+        super().__init__()
+        self.feed_service = feed_service
+        self.action = action
+        self.entry_id = entry_id
+        self.tag = tag
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            service = self.feed_service
+            if hasattr(service, "create_worker_copy"):
+                service = service.create_worker_copy()
+            if self.action == "add":
+                service.add_article_tag(self.entry_id, self.tag)
+            else:
+                service.remove_article_tag(self.entry_id, self.tag)
+            self.finished.emit(self.action, self.entry_id, self.tag)
+        except Exception as exc:
+            self.failed.emit(self.action, str(exc))
 
 
 class CleanTagWorker(QObject):
@@ -1007,13 +1191,27 @@ class MercuryMainWindow(QMainWindow):
         self.summary_active_job = None
         self.summary_job_counter = 0
         self.summary_buffer = ""
+        self.summary_jobs: dict[str, dict] = {}
+        self.summary_buffers: dict[tuple[int, str], str] = {}
         self.summary_detail_level = "default"
         self.summary_target_lang = ""  # "" means follow UI language
+        self.translation_target_lang = "zh-CN"
         self.translation_thread: QThread | None = None
         self.translation_worker = None
         self.translation_active_job = None
         self.translation_job_counter = 0
         self.translation_segments_buffer: list[dict] = []
+        self.translation_source_hashes: dict[int, str] = {}
+        self.translation_jobs: dict[str, dict] = {}
+        self.translation_buffers: dict[tuple[int, str], list[dict]] = {}
+        self.translation_hashes_by_job: dict[tuple[int, str], dict[int, str]] = {}
+        self.add_feed_thread: QThread | None = None
+        self.add_feed_worker: AddFeedWorker | None = None
+        self.import_opml_thread: QThread | None = None
+        self.import_opml_worker: ImportOpmlWorker | None = None
+        self.original_source_url = ""
+        self.article_tag_thread: QThread | None = None
+        self.article_tag_worker: ArticleTagWorker | None = None
         self.selection_translation_thread: QThread | None = None
         self.selection_translation_worker = None
         self.selection_translation_request_id = 0
@@ -1044,6 +1242,7 @@ class MercuryMainWindow(QMainWindow):
             if saved_detail in ("short", "default", "detailed"):
                 self.summary_detail_level = saved_detail
             self.summary_target_lang = (store.get("summary.target_lang", "") or "").strip()
+            self.translation_target_lang = (store.get("translation.target_lang", "zh-CN") or "zh-CN").strip()
 
         self._build_toolbar()
         self._build_layout()
@@ -1220,8 +1419,19 @@ class MercuryMainWindow(QMainWindow):
         self.main_splitter.addWidget(self.reader_panel)
         self.main_splitter.setSizes([self.sidebar_expanded_width, 315, 840])
 
-        root_layout.addWidget(self.main_splitter, 1)
-        root_layout.addWidget(self._create_summary_bar())
+        self.summary_container = self._create_summary_bar()
+        self.vertical_splitter = QSplitter(Qt.Vertical)
+        self.vertical_splitter.setObjectName("VerticalSplitter")
+        self.vertical_splitter.setChildrenCollapsible(False)
+        self.vertical_splitter.addWidget(self.main_splitter)
+        self.vertical_splitter.addWidget(self.summary_container)
+        self.vertical_splitter.setStretchFactor(0, 1)
+        self.vertical_splitter.setStretchFactor(1, 0)
+        self.vertical_splitter.setCollapsible(0, False)
+        self.vertical_splitter.setCollapsible(1, True)
+        self.vertical_splitter.setSizes([760, 96])
+
+        root_layout.addWidget(self.vertical_splitter, 1)
         self.setCentralWidget(root)
 
     def _create_sidebar(self) -> QWidget:
@@ -1287,11 +1497,11 @@ class MercuryMainWindow(QMainWindow):
         header_layout.addWidget(self.article_scope_label)
         header_layout.addStretch(1)
 
-        more_btn = QPushButton("⋯")
-        more_btn.setObjectName("SmallToolbarButton")
-        more_btn.setToolTip("更多筛选")
-        more_btn.clicked.connect(self.on_more_filters)
-        header_layout.addWidget(more_btn)
+        self.more_filters_btn = QPushButton("⋯")
+        self.more_filters_btn.setObjectName("SmallToolbarButton")
+        self.more_filters_btn.setToolTip("更多筛选")
+        self.more_filters_btn.clicked.connect(self.on_more_filters)
+        header_layout.addWidget(self.more_filters_btn)
 
         self.unread_filter_btn = QPushButton("Unread")
         self.unread_filter_btn.setObjectName("SmallToolbarButton")
@@ -1315,15 +1525,37 @@ class MercuryMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        reader_nav = QFrame()
+        reader_nav.setObjectName("ReaderNav")
+        reader_nav_layout = QHBoxLayout(reader_nav)
+        reader_nav_layout.setContentsMargins(10, 6, 10, 6)
+        self.reader_back_btn = QPushButton("← 返回")
+        self.reader_back_btn.setObjectName("SmallToolbarButton")
+        self.reader_back_btn.setToolTip("返回阅读页")
+        self.reader_back_btn.setEnabled(False)
+        self.reader_back_btn.clicked.connect(self.on_reader_back)
+        reader_nav_layout.addWidget(self.reader_back_btn)
+        reader_nav_layout.addStretch(1)
+        reader_nav.setVisible(False)
+        self.reader_nav = reader_nav
+        layout.addWidget(reader_nav)
+
         self.reader = create_reader_view()
         self.reader.setObjectName("Reader")
         if isinstance(self.reader, QTextBrowser):
-            self.reader.setOpenExternalLinks(True)
+            self.reader.setOpenExternalLinks(False)
+            self.reader.anchorClicked.connect(self._open_reader_source_url)
+        elif hasattr(self.reader, "urlChanged"):
+            self.reader.urlChanged.connect(lambda _url: self._update_reader_back_button())
+            if hasattr(self.reader, "loadFinished"):
+                self.reader.loadFinished.connect(self._on_reader_load_finished)
+            if hasattr(self.reader, "originalNavigationStarted"):
+                self.reader.originalNavigationStarted.connect(self._enter_reader_original_mode)
         if hasattr(self.reader, "selectionChanged"):
             self.reader.selectionChanged.connect(self._on_reader_selection_changed)
         layout.addWidget(self.reader, 1)
 
-        self.selection_translation_popup = QFrame(self._reader_overlay_parent())
+        self.selection_translation_popup = ResizablePopupFrame(self._reader_overlay_parent())
         self.selection_translation_popup.setObjectName("SelectionTranslationPopup")
         self.selection_translation_popup.setVisible(False)
         popup_layout = QVBoxLayout(self.selection_translation_popup)
@@ -1334,13 +1566,21 @@ class MercuryMainWindow(QMainWindow):
         self.selection_translation_body = QLabel("")
         self.selection_translation_body.setObjectName("SelectionTranslationBody")
         self.selection_translation_body.setWordWrap(True)
+        self.selection_translation_scroll = QScrollArea()
+        self.selection_translation_scroll.setObjectName("SelectionTranslationScroll")
+        self.selection_translation_scroll.setWidgetResizable(True)
+        self.selection_translation_scroll.setFrameShape(QFrame.NoFrame)
+        self.selection_translation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.selection_translation_scroll.setWidget(self.selection_translation_body)
         popup_layout.addWidget(self.selection_translation_title)
-        popup_layout.addWidget(self.selection_translation_body)
+        popup_layout.addWidget(self.selection_translation_scroll)
         return panel
 
     def _create_summary_bar(self) -> QWidget:
         container = QFrame()
         container.setObjectName("SummaryContainer")
+        container.setMinimumHeight(42)
+        container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         outer = QVBoxLayout(container)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -1358,7 +1598,7 @@ class MercuryMainWindow(QMainWindow):
         self.summary_toggle.clicked.connect(self.on_summary_panel_toggle)
         layout.addWidget(self.summary_toggle)
 
-        layout.addWidget(QLabel("摘要"))
+        layout.addWidget(QLabel("导航"))
         self.summary_text = QLabel("选择文章后可运行摘要。")
         self.summary_text.setObjectName("SummaryText")
         self.summary_text.setWordWrap(False)
@@ -1385,6 +1625,20 @@ class MercuryMainWindow(QMainWindow):
         run_summary_btn.clicked.connect(self.on_summary)
         layout.addWidget(run_summary_btn)
 
+        self.translation_lang_combo = QComboBox()
+        self.translation_lang_combo.setObjectName("TranslationLangCombo")
+        self.translation_lang_combo.setToolTip("翻译语言")
+        for value, label in (
+            ("zh-CN", "译中文"),
+            ("en", "译英文"),
+            ("ja", "译日文"),
+        ):
+            self.translation_lang_combo.addItem(label, value)
+        translation_idx = self.translation_lang_combo.findData(self.translation_target_lang)
+        self.translation_lang_combo.setCurrentIndex(max(0, translation_idx))
+        self.translation_lang_combo.currentIndexChanged.connect(self._on_translation_lang_changed)
+        layout.addWidget(self.translation_lang_combo)
+
         translate_btn = QPushButton("翻译")
         translate_btn.setObjectName("SecondaryActionButton")
         translate_btn.clicked.connect(self.on_translate)
@@ -1395,13 +1649,69 @@ class MercuryMainWindow(QMainWindow):
         self.summary_panel = QTextBrowser()
         self.summary_panel.setObjectName("SummaryPanel")
         self.summary_panel.setOpenExternalLinks(True)
-        self.summary_panel.setMinimumHeight(180)
-        self.summary_panel.setMaximumHeight(280)
+        self.summary_panel.setMinimumHeight(28)
         self.summary_panel.setVisible(False)
-        outer.addWidget(self.summary_panel)
+        self.summary_panel_frame = self._wrap_agent_panel(
+            "摘要",
+            self.summary_panel,
+            self.on_close_summary_panel,
+        )
+        self.summary_panel_frame.setVisible(False)
+        self.translation_panel = QTextBrowser()
+        self.translation_panel.setObjectName("TranslationPanel")
+        self.translation_panel.setOpenExternalLinks(True)
+        self.translation_panel.setMinimumHeight(28)
+        self.translation_panel.setVisible(False)
+        self.translation_panel_frame = self._wrap_agent_panel(
+            "翻译",
+            self.translation_panel,
+            self.on_close_translation_panel,
+        )
+        self.translation_panel_frame.setVisible(False)
+        self.agent_panel_splitter = QSplitter(Qt.Vertical)
+        self.agent_panel_splitter.setObjectName("AgentPanelSplitter")
+        self.agent_panel_splitter.setChildrenCollapsible(True)
+        self.agent_panel_splitter.addWidget(self.summary_panel_frame)
+        self.agent_panel_splitter.addWidget(self.translation_panel_frame)
+        self.agent_panel_splitter.setCollapsible(0, True)
+        self.agent_panel_splitter.setCollapsible(1, True)
+        self.agent_panel_splitter.setMinimumHeight(0)
+        self.agent_panel_splitter.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        self.agent_panel_splitter.setSizes([92, 92])
+        self.agent_panel_splitter.setVisible(False)
+        outer.addWidget(self.agent_panel_splitter)
         self.summary_panel_expanded = False
 
         return container
+
+    def _wrap_agent_panel(self, title: str, body: QTextBrowser, close_slot) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("AgentPanelFrame")
+        frame.setMinimumHeight(56)
+        frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("AgentPanelHeader")
+        header.setFixedHeight(32)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 6, 8, 6)
+        title_label = QLabel(title)
+        title_label.setObjectName("AgentPanelTitle")
+        close_button = QPushButton("×")
+        close_button.setObjectName("PanelCloseButton")
+        close_button.setFixedSize(24, 24)
+        close_button.setToolTip(f"关闭{title}面板")
+        close_button.clicked.connect(close_slot)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch(1)
+        header_layout.addWidget(close_button)
+
+        layout.addWidget(header)
+        layout.addWidget(body, 1)
+        return frame
 
     # -----------------------------
     # Styling
@@ -1466,6 +1776,10 @@ class MercuryMainWindow(QMainWindow):
             QFrame#ReaderPanel {
                 background: #ffffff;
             }
+            QFrame#ReaderNav {
+                background: #ffffff;
+                border-bottom: 1px solid #edf0f3;
+            }
             QLabel#SectionTitle {
                 font-size: 16px;
                 font-weight: 700;
@@ -1505,8 +1819,8 @@ class MercuryMainWindow(QMainWindow):
                 padding: 4px 10px;
             }
             QPushButton#PrimaryActionButton {
-                background: #0969da;
-                color: white;
+                background: #eef1f4;
+                color: #1f2328;
                 font-weight: 700;
                 border-radius: 8px;
             }
@@ -1624,6 +1938,11 @@ class MercuryMainWindow(QMainWindow):
                 color: #1f2328;
                 font-size: 14px;
                 line-height: 1.35;
+                background: #ffffff;
+            }
+            QScrollArea#SelectionTranslationScroll {
+                background: #ffffff;
+                border: 0;
             }
             QFrame#SummaryBar {
                 background: #fbfcfd;
@@ -1639,10 +1958,35 @@ class MercuryMainWindow(QMainWindow):
                 color: #57606a;
                 font-size: 14px;
             }
-            QTextBrowser#SummaryPanel {
+            QFrame#AgentPanelFrame {
+                background: #fdfdfd;
+                border-top: 1px solid #e5e9ef;
+            }
+            QFrame#AgentPanelHeader {
+                background: #f7f8fa;
+                border-bottom: 1px solid #e5e9ef;
+            }
+            QLabel#AgentPanelTitle {
+                color: #57606a;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton#PanelCloseButton {
+                background: transparent;
+                color: #6e7781;
+                border-radius: 12px;
+                padding: 0;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QPushButton#PanelCloseButton:hover {
+                background: #eaeef2;
+                color: #24292f;
+            }
+            QTextBrowser#SummaryPanel,
+            QTextBrowser#TranslationPanel {
                 background: #fdfdfd;
                 border: 0;
-                border-top: 1px solid #e5e9ef;
                 color: #1f2328;
                 padding: 12px 18px;
                 font-size: 14px;
@@ -1652,6 +1996,15 @@ class MercuryMainWindow(QMainWindow):
             }
             QSplitter::handle:horizontal {
                 width: 1px;
+            }
+            QSplitter#VerticalSplitter::handle,
+            QSplitter#AgentPanelSplitter::handle {
+                background: #d8dee4;
+                height: 6px;
+            }
+            QSplitter#VerticalSplitter::handle:hover,
+            QSplitter#AgentPanelSplitter::handle:hover {
+                background: #b9c0c9;
             }
             """
         )
@@ -1832,23 +2185,32 @@ class MercuryMainWindow(QMainWindow):
                 unread_only=self.unread_filter_enabled,
             )
             scope = feed_title or "All Feeds"
+        previous_updates = self.article_list.updatesEnabled()
+        previous_block_state = self.article_list.blockSignals(True)
+        self.article_list.setUpdatesEnabled(False)
         self.article_list.clear()
-        self.article_scope_label.setText(f"{scope} · 未读" if self.unread_filter_enabled else scope)
-        self.unread_filter_btn.setChecked(self.unread_filter_enabled)
+        try:
+            self.article_scope_label.setText(f"{scope} · 未读" if self.unread_filter_enabled else scope)
+            self.unread_filter_btn.setChecked(self.unread_filter_enabled)
 
-        for article in self.current_articles:
-            item = QListWidgetItem()
-            widget = ArticleListItem(article, self.on_toggle_starred_from_list)
-            item.setSizeHint(QSize(280, 84))
-            item.setData(Qt.UserRole, article)
-            self.article_list.addItem(item)
-            self.article_list.setItemWidget(item, widget)
+            for article in self.current_articles:
+                item = QListWidgetItem()
+                widget = ArticleListItem(article, self.on_toggle_starred_from_list)
+                item.setSizeHint(QSize(280, 84))
+                item.setData(Qt.UserRole, article)
+                self.article_list.addItem(item)
+                self.article_list.setItemWidget(item, widget)
+        finally:
+            self.article_list.blockSignals(previous_block_state)
+            self.article_list.setUpdatesEnabled(previous_updates)
 
         if self.current_articles:
             self.article_list.setCurrentRow(0)
+            self.on_article_selected(self.article_list.currentItem(), None)
         else:
             self.current_article = None
             self.reader.setHtml("<p style='padding:32px;color:#777;'>没有文章。</p>")
+            self._set_reader_original_mode(False)
             self._refresh_action_states()
 
     def _update_sidebar_footer(self) -> None:
@@ -1885,7 +2247,10 @@ class MercuryMainWindow(QMainWindow):
                     widget = self.article_list.itemWidget(current_item)
                     if isinstance(widget, ArticleListItem):
                         widget.apply_article(article)
-                self._load_feeds()
+                if self.current_sidebar_mode == "tags":
+                    self._load_tags()
+                else:
+                    self._load_feeds()
             except Exception as exc:
                 self._show_error_dialog("更新已读状态失败", str(exc))
 
@@ -1895,6 +2260,7 @@ class MercuryMainWindow(QMainWindow):
             self.reader.setHtml(cached_document.reader_html)
         else:
             self.reader.setHtml(self.reader_pipeline.render_article_html(article))
+        self._set_reader_original_mode(False)
         self._restore_agent_panel_for_article(article)
         self._refresh_action_states()
 
@@ -1948,7 +2314,7 @@ class MercuryMainWindow(QMainWindow):
         self._start_selection_translation(text)
 
     def _start_selection_translation(self, text: str) -> None:
-        target_lang = self._resolve_target_language()
+        target_lang = self._resolve_summary_language()
         cache_key = (target_lang, text)
         if cache_key in self.selection_translation_cache:
             self._show_selection_translation_popup(
@@ -2007,16 +2373,17 @@ class MercuryMainWindow(QMainWindow):
     def _show_selection_translation_popup(self, text: str) -> None:
         self.selection_translation_body.setText(text)
         viewport = self._reader_overlay_parent()
-        width = min(360, max(240, viewport.width() - 24))
-        self.selection_translation_popup.setFixedWidth(width)
-        self.selection_translation_popup.adjustSize()
+        if not self.selection_translation_popup.isVisible():
+            width = min(360, max(240, viewport.width() - 24))
+            height = min(260, max(140, viewport.height() // 3))
+            self.selection_translation_popup.resize(width, height)
         cursor_rect = None
         cursor_rect_getter = getattr(self.reader, "cursorRect", None)
         text_cursor_getter = getattr(self.reader, "textCursor", None)
         if callable(cursor_rect_getter) and callable(text_cursor_getter):
             cursor_rect = cursor_rect_getter(text_cursor_getter())
         pos = cursor_rect.bottomRight() + QPoint(12, 12) if cursor_rect is not None else QPoint(12, 12)
-        popup_size = self.selection_translation_popup.sizeHint()
+        popup_size = self.selection_translation_popup.size()
         if pos.x() + popup_size.width() > viewport.width():
             pos.setX(max(8, viewport.width() - popup_size.width() - 8))
         if pos.y() + popup_size.height() > viewport.height():
@@ -2128,6 +2495,7 @@ class MercuryMainWindow(QMainWindow):
         else:
             self.current_article = None
             self.reader.setHtml("<p style='padding:32px;color:#777;'>没有文章。</p>")
+            self._set_reader_original_mode(False)
             self._refresh_action_states()
 
     # -----------------------------
@@ -2180,6 +2548,7 @@ class MercuryMainWindow(QMainWindow):
                 else:
                     self.current_article = None
                     self.reader.setHtml("<p style='padding:32px;color:#777;'>没有匹配标签的文章。</p>")
+                    self._set_reader_original_mode(False)
                     self._refresh_action_states()
                 return
 
@@ -2229,31 +2598,139 @@ class MercuryMainWindow(QMainWindow):
             self.article_list.clear()
             self.article_scope_label.setText("Tags")
             self.reader.setHtml("<p style='padding:32px;color:#777;'>还没有标签。</p>")
+            self._set_reader_original_mode(False)
             self.summary_text.setText("可以给文章添加自定义标签。")
             self._refresh_action_states()
 
     def on_more_filters(self) -> None:
-        self._show_interface_dialog(
-            title="更多筛选",
-            module="GUI / EntryList",
-            interface="EntryQueryBuilder",
-            current="当前只保留按钮入口，还没有真实筛选菜单。",
-            next_step="接入按 Feed、未读、星标、搜索关键字组合查询的 EntryStore 接口。",
-            risk="筛选条件必须和数据库查询一致，不能只在 UI 层隐藏条目。",
-        )
+        menu = self._build_more_filters_menu()
+        show_all, show_unread, show_starred, clear_search = menu.actions()
+        action = menu.exec(self.more_filters_btn.mapToGlobal(self.more_filters_btn.rect().bottomLeft()))
+        if action is None:
+            return
+        if action is show_all:
+            self.unread_filter_enabled = False
+            self.unread_filter_btn.setChecked(False)
+            self.search_box.clear()
+            self._load_articles(self.current_feed_title)
+            self.summary_text.setText("已显示全部文章。")
+            return
+        if action is show_unread:
+            self.unread_filter_enabled = not self.unread_filter_enabled
+            self.unread_filter_btn.setChecked(self.unread_filter_enabled)
+            self._load_articles(self.current_feed_title)
+            state = "开启" if self.unread_filter_enabled else "关闭"
+            self.summary_text.setText(f"未读筛选已{state}。")
+            return
+        if action is show_starred:
+            self.unread_filter_enabled = False
+            self.unread_filter_btn.setChecked(False)
+            self.search_box.clear()
+            self.current_sidebar_mode = "feeds"
+            self.current_tag = None
+            self.current_feed_title = "Starred"
+            self._load_articles("Starred")
+            self.summary_text.setText("已切换到星标文章。")
+            return
+        if action is clear_search:
+            self.search_box.clear()
+            self._load_articles(self.current_feed_title)
+            self.summary_text.setText("已清除搜索。")
+
+    def _build_more_filters_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction("显示全部")
+        show_unread = menu.addAction("只看未读")
+        show_unread.setCheckable(True)
+        show_unread.setChecked(self.unread_filter_enabled)
+        menu.addAction("只看星标")
+        clear_search = menu.addAction("清除搜索")
+        clear_search.setEnabled(bool(self.search_box.text().strip()))
+        return menu
 
     def on_unread_filter(self) -> None:
         self.unread_filter_enabled = self.unread_filter_btn.isChecked()
-        self._load_articles(self.current_feed_title)
+        if self.current_sidebar_mode == "tags":
+            self._load_articles(None)
+        else:
+            self._load_articles(self.current_feed_title)
         state = "开启" if self.unread_filter_enabled else "关闭"
         self.summary_text.setText(f"未读筛选已{state}。")
 
     def on_summary_panel_toggle(self) -> None:
         self.summary_panel_expanded = not self.summary_panel_expanded
-        self.summary_panel.setVisible(self.summary_panel_expanded)
+        if self.summary_panel_expanded:
+            self._sync_agent_panel_visibility(show_empty_summary=True)
+            self._set_agent_panel_readable_size()
+        else:
+            self.summary_panel.setVisible(False)
+            self.summary_panel_frame.setVisible(False)
+            self.translation_panel.setVisible(False)
+            self.translation_panel_frame.setVisible(False)
+            self.agent_panel_splitter.setVisible(False)
+            self._set_agent_panel_compact_size()
         self.summary_toggle.setText("⌄" if self.summary_panel_expanded else "⌃")
 
+    def on_close_summary_panel(self) -> None:
+        self.summary_panel.clear()
+        self.summary_panel.setVisible(False)
+        self.summary_panel_frame.setVisible(False)
+        self._sync_agent_panel_visibility()
+
+    def on_close_translation_panel(self) -> None:
+        self.translation_panel.clear()
+        self.translation_panel.setVisible(False)
+        self.translation_panel_frame.setVisible(False)
+        self._sync_agent_panel_visibility()
+
+    def _sync_agent_panel_visibility(self, *, show_empty_summary: bool = False) -> None:
+        show_summary = bool(self.summary_panel.toPlainText().strip()) or show_empty_summary
+        show_translation = bool(self.translation_panel.toPlainText().strip())
+        if self.summary_panel_expanded:
+            self.summary_panel.setVisible(show_summary)
+            self.summary_panel_frame.setVisible(show_summary)
+            self.translation_panel.setVisible(show_translation)
+            self.translation_panel_frame.setVisible(show_translation)
+            self.agent_panel_splitter.setVisible(show_summary or show_translation)
+            if not show_summary and not show_translation:
+                self.summary_panel_expanded = False
+                self.summary_toggle.setText("⌃")
+                self.agent_panel_splitter.setVisible(False)
+                self._set_agent_panel_compact_size()
+        else:
+            self.agent_panel_splitter.setVisible(False)
+            self._set_agent_panel_compact_size()
+
+    def _set_agent_panel_readable_size(self) -> None:
+        if not hasattr(self, "vertical_splitter"):
+            return
+        total = sum(self.vertical_splitter.sizes())
+        if total <= 0:
+            return
+        bottom = min(max(240, total // 3), 320)
+        self.vertical_splitter.setSizes([max(120, total - bottom), bottom])
+        summary_visible = self.summary_panel_frame.isVisible()
+        translation_visible = self.translation_panel_frame.isVisible()
+        if summary_visible and translation_visible:
+            self.agent_panel_splitter.setSizes([bottom // 2, bottom // 2])
+        elif summary_visible:
+            self.agent_panel_splitter.setSizes([bottom, 0])
+        elif translation_visible:
+            self.agent_panel_splitter.setSizes([0, bottom])
+
+    def _set_agent_panel_compact_size(self) -> None:
+        if not hasattr(self, "vertical_splitter"):
+            return
+        total = sum(self.vertical_splitter.sizes())
+        if total <= 0:
+            return
+        compact_height = 46
+        self.vertical_splitter.setSizes([max(120, total - compact_height), compact_height])
+
     def on_add_feed(self) -> None:
+        if self.add_feed_thread is not None and self.add_feed_thread.isRunning():
+            self.summary_text.setText("订阅源正在添加，请稍候。")
+            return
         url, accepted = QInputDialog.getText(
             self,
             "添加订阅源",
@@ -2262,21 +2739,36 @@ class MercuryMainWindow(QMainWindow):
         )
         if not accepted or not url.strip():
             return
-        try:
-            self.feed_service.add_feed(url.strip())
-            self._load_feeds()
-            self._load_articles(self.current_feed_title)
-        except Exception as exc:
-            self._show_error_dialog("添加订阅源失败", str(exc))
-            return
-        self._show_interface_dialog(
-            title="添加订阅源",
-            module="Feed / OPML",
-            interface="FeedService.add_feed(url)",
-            current=f"已调用真实 FeedService.add_feed()：{url.strip()}",
-            next_step="后续由本地存储组把 JSON cache 替换为 SQLite FeedStore / EntryStore。",
-            risk="Feed URL 可能重定向、不可访问或不是有效 RSS / Atom，需要清晰错误提示。",
-        )
+        feed_url = url.strip()
+        self.summary_text.setText("正在后台添加订阅源…")
+        self.add_feed_thread = QThread(self)
+        self.add_feed_worker = AddFeedWorker(self.feed_service, feed_url)
+        self.add_feed_worker.moveToThread(self.add_feed_thread)
+        self.add_feed_thread.started.connect(self.add_feed_worker.run)
+        self.add_feed_worker.finished.connect(self.on_add_feed_finished)
+        self.add_feed_worker.failed.connect(self.on_add_feed_failed)
+        self.add_feed_worker.finished.connect(self.add_feed_thread.quit)
+        self.add_feed_worker.failed.connect(self.add_feed_thread.quit)
+        self.add_feed_thread.finished.connect(self.add_feed_worker.deleteLater)
+        self.add_feed_thread.finished.connect(self.add_feed_thread.deleteLater)
+        self.add_feed_thread.finished.connect(self._clear_add_feed_worker)
+        self.add_feed_thread.start()
+
+    @Slot(str)
+    def on_add_feed_finished(self, url: str) -> None:
+        self._load_feeds()
+        self._load_articles(self.current_feed_title)
+        self.summary_text.setText(f"已添加订阅源：{url}")
+
+    @Slot(str)
+    def on_add_feed_failed(self, message: str) -> None:
+        self.summary_text.setText("添加订阅源失败。")
+        self._show_error_dialog("添加订阅源失败", message)
+
+    @Slot()
+    def _clear_add_feed_worker(self) -> None:
+        self.add_feed_thread = None
+        self.add_feed_worker = None
 
     def on_delete_feed(self) -> None:
         if self.current_sidebar_mode != "feeds":
@@ -2418,6 +2910,9 @@ class MercuryMainWindow(QMainWindow):
     def on_add_article_tag(self) -> None:
         if not self.current_article:
             return
+        if self.article_tag_thread is not None and self.article_tag_thread.isRunning():
+            self.summary_text.setText("标签操作正在进行，请稍候。")
+            return
         tag, accepted = QInputDialog.getText(
             self,
             "添加标签",
@@ -2426,18 +2921,13 @@ class MercuryMainWindow(QMainWindow):
         )
         if not accepted or not tag.strip():
             return
-        try:
-            self.feed_service.add_article_tag(self.current_article.entry_id, tag.strip())
-        except Exception as exc:
-            self._show_error_dialog("添加标签失败", str(exc))
-            return
-        self.summary_text.setText(f"已添加标签：{tag.strip()}")
-        if self.current_sidebar_mode == "tags":
-            self._load_tags()
-        self._reload_articles_preserving_selection(self.current_article.entry_id)
+        self._start_article_tag_job("add", self.current_article.entry_id, tag.strip())
 
     def on_remove_article_tag(self) -> None:
         if not self.current_article or not self.current_article.tags:
+            return
+        if self.article_tag_thread is not None and self.article_tag_thread.isRunning():
+            self.summary_text.setText("标签操作正在进行，请稍候。")
             return
         tag, accepted = QInputDialog.getItem(
             self,
@@ -2449,15 +2939,47 @@ class MercuryMainWindow(QMainWindow):
         )
         if not accepted or not tag:
             return
-        try:
-            self.feed_service.remove_article_tag(self.current_article.entry_id, tag)
-        except Exception as exc:
-            self._show_error_dialog("移除标签失败", str(exc))
-            return
-        self.summary_text.setText(f"已移除标签：{tag}")
+        self._start_article_tag_job("remove", self.current_article.entry_id, tag)
+
+    def _start_article_tag_job(self, action: str, entry_id: str, tag: str) -> None:
+        self.summary_text.setText("正在后台更新标签…")
+        self.article_tag_thread = QThread(self)
+        self.article_tag_worker = ArticleTagWorker(
+            self.feed_service,
+            action=action,
+            entry_id=entry_id,
+            tag=tag,
+        )
+        self.article_tag_worker.moveToThread(self.article_tag_thread)
+        self.article_tag_thread.started.connect(self.article_tag_worker.run)
+        self.article_tag_worker.finished.connect(self.on_article_tag_finished)
+        self.article_tag_worker.failed.connect(self.on_article_tag_failed)
+        self.article_tag_worker.finished.connect(self.article_tag_thread.quit)
+        self.article_tag_worker.failed.connect(self.article_tag_thread.quit)
+        self.article_tag_thread.finished.connect(self.article_tag_worker.deleteLater)
+        self.article_tag_thread.finished.connect(self.article_tag_thread.deleteLater)
+        self.article_tag_thread.finished.connect(self._clear_article_tag_worker)
+        self.article_tag_thread.start()
+
+    @Slot(str, str, str)
+    def on_article_tag_finished(self, action: str, entry_id: str, tag: str) -> None:
+        verb = "已添加" if action == "add" else "已移除"
+        self.summary_text.setText(f"{verb}标签：{tag}")
         if self.current_sidebar_mode == "tags":
             self._load_tags()
-        self._reload_articles_preserving_selection(self.current_article.entry_id)
+        self._reload_articles_preserving_selection(entry_id)
+
+    @Slot(str, str)
+    def on_article_tag_failed(self, action: str, message: str) -> None:
+        title = "添加标签失败" if action == "add" else "移除标签失败"
+        self.summary_text.setText(title)
+        self._show_error_dialog(title, message)
+
+    @Slot()
+    def _clear_article_tag_worker(self) -> None:
+        self.article_tag_thread = None
+        self.article_tag_worker = None
+        self._refresh_action_states()
 
     def on_mark_current_tag_read(self) -> None:
         if not self.current_tag:
@@ -2527,8 +3049,72 @@ class MercuryMainWindow(QMainWindow):
             return
         self.reader.setHtml(self.reader_pipeline.render_article_html(self.current_article))
         self.summary_text.setText(f"已还原未清洗显示：{self.current_article.title}")
+        self._set_reader_original_mode(False)
+
+    def on_reader_back(self) -> None:
+        if not self.current_article:
+            self._set_reader_original_mode(False)
+            return
+        self.original_source_url = ""
+        stop = getattr(self.reader, "stop", None)
+        if callable(stop):
+            stop()
+        cached_document = self._cached_reader_document(self.current_article)
+        if cached_document is not None:
+            self.reader.setHtml(cached_document.reader_html)
+        else:
+            self.reader.setHtml(self.reader_pipeline.render_article_html(self.current_article))
+        self._set_reader_original_mode(False)
+        self.summary_text.setText(f"已打开：{self.current_article.title}")
+
+    def _update_reader_back_button(self) -> None:
+        if not hasattr(self, "reader_back_btn"):
+            return
+        self.reader_back_btn.setEnabled(self.reader_nav.isVisible())
+
+    @Slot(QUrl)
+    def _open_reader_source_url(self, url: QUrl) -> None:
+        if not url.isValid():
+            return
+        if url.scheme() not in {"http", "https"}:
+            QDesktopServices.openUrl(url)
+            return
+        if not isinstance(self.reader, QTextBrowser) and callable(getattr(self.reader, "load", None)):
+            self._enter_reader_original_mode(url)
+            self.reader.load(url)
+            return
+        self._enter_reader_original_mode(url)
+        self.reader.setHtml(
+            "<p style='padding:28px;color:#b42318;'>当前环境未启用内置浏览器。<br>"
+            "<span style='font-size:12px;color:#666;'>请安装 PySide6 WebEngine，"
+            "或不要设置 MERCURY_READER_RENDERER=text。</span></p>"
+        )
+        self.summary_text.setText("内置浏览器不可用。")
+
+    @Slot(QUrl)
+    def _enter_reader_original_mode(self, url: QUrl) -> None:
+        if not url.isValid() or url.scheme() not in {"http", "https"}:
+            return
+        self._set_reader_original_mode(True)
+        self.original_source_url = url.toString()
+        self.summary_text.setText("正在打开原文…")
+
+    @Slot(bool)
+    def _on_reader_load_finished(self, ok: bool) -> None:
+        if self.reader_nav.isHidden() or not self.original_source_url:
+            return
+        self.summary_text.setText("已打开原文。" if ok else "原文加载失败。")
+
+    def _set_reader_original_mode(self, active: bool) -> None:
+        if not hasattr(self, "reader_nav"):
+            return
+        self.reader_nav.setVisible(active)
+        self.reader_back_btn.setEnabled(active)
 
     def on_import_opml(self) -> None:
+        if self.import_opml_thread is not None and self.import_opml_thread.isRunning():
+            self.summary_text.setText("OPML 正在导入，请稍候。")
+            return
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "导入 OPML",
@@ -2537,21 +3123,37 @@ class MercuryMainWindow(QMainWindow):
         )
         if not path:
             return
-        try:
-            self.feed_service.import_opml(path)
-            self._load_feeds()
-            self._load_articles(self.current_feed_title)
-        except Exception as exc:
-            self._show_error_dialog("导入 OPML 失败", str(exc))
-            return
-        self._show_interface_dialog(
-            title="导入 OPML",
-            module="Feed / OPML",
-            interface="FeedService.import_opml(path)",
-            current=f"已从文件导入订阅源：{path}",
-            next_step="点击刷新后会逐个拉取导入的订阅源，并将 entries 写入缓存；后续接入 SQLite。",
-            risk="OPML 可能包含重复订阅、无效 URL 或嵌套分组，导入逻辑必须幂等。",
-        )
+        self.import_opml_action.setEnabled(False)
+        self.summary_text.setText("正在后台导入 OPML…")
+        self.import_opml_thread = QThread(self)
+        self.import_opml_worker = ImportOpmlWorker(self.feed_service, path)
+        self.import_opml_worker.moveToThread(self.import_opml_thread)
+        self.import_opml_thread.started.connect(self.import_opml_worker.run)
+        self.import_opml_worker.finished.connect(self.on_import_opml_finished)
+        self.import_opml_worker.failed.connect(self.on_import_opml_failed)
+        self.import_opml_worker.finished.connect(self.import_opml_thread.quit)
+        self.import_opml_worker.failed.connect(self.import_opml_thread.quit)
+        self.import_opml_thread.finished.connect(self.import_opml_worker.deleteLater)
+        self.import_opml_thread.finished.connect(self.import_opml_thread.deleteLater)
+        self.import_opml_thread.finished.connect(self._clear_import_opml_worker)
+        self.import_opml_thread.start()
+
+    @Slot(str)
+    def on_import_opml_finished(self, path: str) -> None:
+        self._load_feeds()
+        self._load_articles(self.current_feed_title)
+        self.summary_text.setText(f"已导入 OPML：{path}")
+
+    @Slot(str)
+    def on_import_opml_failed(self, message: str) -> None:
+        self.summary_text.setText("导入 OPML 失败。")
+        self._show_error_dialog("导入 OPML 失败", message)
+
+    @Slot()
+    def _clear_import_opml_worker(self) -> None:
+        self.import_opml_thread = None
+        self.import_opml_worker = None
+        self.import_opml_action.setEnabled(True)
 
     def on_refresh_all(self) -> None:
         if self.refresh_thread is not None and self.refresh_thread.isRunning():
@@ -2653,6 +3255,7 @@ class MercuryMainWindow(QMainWindow):
             or (not entry_id and article_url == current_url)
         ):
             self.reader.setHtml(document.reader_html)
+            self._set_reader_original_mode(False)
             self.summary_text.setText(f"已清洗并显示：{document.title}")
         else:
             self.summary_text.setText(f"已清洗并缓存：{document.title}")
@@ -2671,24 +3274,25 @@ class MercuryMainWindow(QMainWindow):
     def on_summary(self) -> None:
         if not self.current_article:
             return
-        # If a job is already running for any entry, the second click cancels it.
-        if self.summary_thread is not None and self.summary_worker is not None:
-            self.summary_worker.request_cancel()
-            self.summary_text.setText("正在取消摘要…")
-            return
-
         agent = self._ensure_summary_agent()
         if agent is None:
             return
 
         article = self.current_article
-        entry_id = getattr(article, "entry_id", "") or ""
+        entry_id = getattr(article, "entry_id", "") or getattr(article, "url", "") or ""
+        existing = self.summary_jobs.get(entry_id)
+        if existing is not None:
+            existing["worker"].request_cancel()
+            if self._is_current_entry(entry_id):
+                self.summary_text.setText("正在取消摘要…")
+            return
+
         content = self._summary_input_for(article)
         if not content.strip():
             self._show_error_dialog("无法生成摘要", "当前文章没有可用的正文。")
             return
 
-        target_lang = self._resolve_target_language()
+        target_lang = self._resolve_summary_language()
 
         from mercury.agent.summary.summary_agent import SummaryRequest
         from mercury.agent.summary.summary_worker import SummaryJob, SummaryWorker
@@ -2697,6 +3301,7 @@ class MercuryMainWindow(QMainWindow):
         job = SummaryJob(job_id=self.summary_job_counter, entry_id=entry_id)
         self.summary_active_job = job
         self.summary_buffer = ""
+        self.summary_buffers[(job.job_id, entry_id)] = ""
 
         request = SummaryRequest(
             entry_id=entry_id,
@@ -2718,10 +3323,15 @@ class MercuryMainWindow(QMainWindow):
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
-        thread.finished.connect(self._clear_summary_worker)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda job_id=job.job_id, eid=entry_id: self._clear_summary_worker_for(job_id, eid)
+        )
 
         self.summary_thread = thread
         self.summary_worker = worker
+        self.summary_jobs[entry_id] = {"thread": thread, "worker": worker, "job": job}
         thread.start()
 
         self.summary_text.setText("正在生成摘要…")
@@ -2754,7 +3364,7 @@ class MercuryMainWindow(QMainWindow):
     def _settings_store_or_none(self):
         return getattr(self.feed_service, "settings_store", None)
 
-    def _resolve_target_language(self) -> str:
+    def _resolve_summary_language(self) -> str:
         """Pick the summary language: explicit override, else UI language, else zh-CN."""
         if self.summary_target_lang:
             return self.summary_target_lang
@@ -2763,6 +3373,13 @@ class MercuryMainWindow(QMainWindow):
             return store.current_language() or "zh-CN"
         return "zh-CN"
 
+    def _resolve_translation_language(self) -> str:
+        return self.translation_target_lang or "zh-CN"
+
+    def _resolve_target_language(self) -> str:
+        """Compatibility helper for selection translation."""
+        return self._resolve_translation_language()
+
     @Slot(int)
     def _on_summary_lang_changed(self, _index: int) -> None:
         value = self.summary_lang_combo.currentData() or ""
@@ -2770,6 +3387,14 @@ class MercuryMainWindow(QMainWindow):
         store = self._settings_store_or_none()
         if store is not None:
             store.set("summary.target_lang", value)
+
+    @Slot(int)
+    def _on_translation_lang_changed(self, _index: int) -> None:
+        value = self.translation_lang_combo.currentData() or "zh-CN"
+        self.translation_target_lang = value
+        store = self._settings_store_or_none()
+        if store is not None:
+            store.set("translation.target_lang", value)
 
     def _summary_input_for(self, article: Article) -> str:
         """Prefer canonical_markdown from the reader pipeline, else article.summary."""
@@ -2783,17 +3408,17 @@ class MercuryMainWindow(QMainWindow):
         return getattr(self.feed_service, "summary_store", None)
 
     def _restore_agent_panel_for_article(self, article: Article) -> None:
-        if self._restore_translation_for_article(article):
-            return
-        self._restore_summary_for_article(article)
+        restored_summary = self._restore_summary_for_article(article)
+        restored_translation = self._restore_translation_for_article(article)
+        if not restored_summary and not restored_translation:
+            self.summary_text.setText(f"已打开：{article.title}")
 
-    def _restore_summary_for_article(self, article: Article) -> None:
+    def _restore_summary_for_article(self, article: Article) -> bool:
         store = self._summary_store()
         entry_id = getattr(article, "entry_id", "") or ""
         if store is None or not entry_id:
-            self.summary_text.setText("选择文章后可运行摘要。")
             self._render_summary_panel("")
-            return
+            return False
         try:
             cached = store.get(entry_id)
         except Exception:
@@ -2801,14 +3426,18 @@ class MercuryMainWindow(QMainWindow):
         if cached:
             self.summary_text.setText(self._summary_status_preview(cached))
             self._render_summary_panel(cached)
-            self._auto_expand_summary_panel()
+            self._auto_expand_agent_panel()
+            return True
         else:
-            self.summary_text.setText(f"已打开：{article.title}")
             self._render_summary_panel("")
+            return False
 
     def _render_summary_panel(self, text: str) -> None:
         if not text:
             self.summary_panel.clear()
+            self.summary_panel.setVisible(False)
+            self.summary_panel_frame.setVisible(False)
+            self._sync_agent_panel_visibility()
             return
         try:
             self.summary_panel.setMarkdown(text)
@@ -2818,12 +3447,38 @@ class MercuryMainWindow(QMainWindow):
         cursor = self.summary_panel.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.summary_panel.setTextCursor(cursor)
+        if self.summary_panel_expanded:
+            self.summary_panel.setVisible(True)
+            self.summary_panel_frame.setVisible(True)
+            self.agent_panel_splitter.setVisible(True)
 
-    def _auto_expand_summary_panel(self) -> None:
+    def _render_translation_panel(self, text: str) -> None:
+        if not text:
+            self.translation_panel.clear()
+            self.translation_panel.setVisible(False)
+            self.translation_panel_frame.setVisible(False)
+            self._sync_agent_panel_visibility()
+            return
+        try:
+            self.translation_panel.setMarkdown(text)
+        except Exception:
+            self.translation_panel.setPlainText(text)
+        cursor = self.translation_panel.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.translation_panel.setTextCursor(cursor)
+        if self.summary_panel_expanded:
+            self.translation_panel.setVisible(True)
+            self.translation_panel_frame.setVisible(True)
+            self.agent_panel_splitter.setVisible(True)
+
+    def _auto_expand_agent_panel(self) -> None:
         if not self.summary_panel_expanded:
             self.summary_panel_expanded = True
-            self.summary_panel.setVisible(True)
             self.summary_toggle.setText("⌄")
+            self._sync_agent_panel_visibility()
+            self._set_agent_panel_readable_size()
+            return
+        self._sync_agent_panel_visibility()
 
     @staticmethod
     def _summary_status_preview(text: str) -> str:
@@ -2842,14 +3497,14 @@ class MercuryMainWindow(QMainWindow):
         if store is None or not entry_id:
             return False
         try:
-            segments = store.get_segments(entry_id, self._resolve_target_language())
+            segments = store.get_segments(entry_id, self._resolve_translation_language())
         except Exception:
             return False
         if not segments:
             return False
         self.summary_text.setText(f"已恢复翻译缓存：{len(segments)} 段")
-        self._render_summary_panel(self._format_translation_markdown(segments))
-        self._auto_expand_summary_panel()
+        self._render_translation_panel(self._format_translation_markdown(segments))
+        self._auto_expand_agent_panel()
         return True
 
     @staticmethod
@@ -2871,18 +3526,22 @@ class MercuryMainWindow(QMainWindow):
     def _on_summary_started(self, job_id: int, entry_id: str) -> None:
         if not self._is_active_summary_job(job_id, entry_id):
             return
+        if not self._is_current_entry(entry_id):
+            return
         self.summary_text.setText("正在生成摘要…")
         self._render_summary_panel("")
-        self._auto_expand_summary_panel()
+        self._auto_expand_agent_panel()
 
     @Slot(int, str, str)
     def _on_summary_token(self, job_id: int, entry_id: str, chunk: str) -> None:
         if not self._is_active_summary_job(job_id, entry_id):
             return
-        self.summary_buffer += chunk
+        key = (job_id, entry_id)
+        self.summary_buffers[key] = self.summary_buffers.get(key, "") + chunk
+        self.summary_buffer = self.summary_buffers[key]
         if self._is_current_entry(entry_id):
-            self.summary_text.setText(f"生成中… {len(self.summary_buffer)} 字")
-            self._render_summary_panel(self.summary_buffer)
+            self.summary_text.setText(f"生成中… {len(self.summary_buffers[key])} 字")
+            self._render_summary_panel(self.summary_buffers[key])
 
     @Slot(int, str, str, str, bool)
     def _on_summary_finished(
@@ -2907,7 +3566,7 @@ class MercuryMainWindow(QMainWindow):
                 preview = "[已裁剪] " + preview
             self.summary_text.setText(preview)
             self._render_summary_panel(full_text)
-            self._auto_expand_summary_panel()
+            self._auto_expand_agent_panel()
 
     @Slot(int, str, str)
     def _on_summary_failed(self, job_id: int, entry_id: str, message: str) -> None:
@@ -2915,7 +3574,7 @@ class MercuryMainWindow(QMainWindow):
             return
         if self._is_current_entry(entry_id):
             self.summary_text.setText("摘要生成失败。")
-        self._show_error_dialog("摘要生成失败", message)
+            self._show_error_dialog("摘要生成失败", message)
 
     @Slot(int, str)
     def _on_summary_cancelled(self, job_id: int, entry_id: str) -> None:
@@ -2931,13 +3590,17 @@ class MercuryMainWindow(QMainWindow):
         self.summary_active_job = None
         self.summary_buffer = ""
 
+    def _clear_summary_worker_for(self, job_id: int, entry_id: str) -> None:
+        active = self.summary_jobs.get(entry_id)
+        if active is not None and active["job"].job_id == job_id:
+            self.summary_jobs.pop(entry_id, None)
+        self.summary_buffers.pop((job_id, entry_id), None)
+        if self.summary_active_job is not None and self.summary_active_job.job_id == job_id:
+            self._clear_summary_worker()
+
     def _is_active_summary_job(self, job_id: int, entry_id: str) -> bool:
-        active = self.summary_active_job
-        return (
-            active is not None
-            and active.job_id == job_id
-            and active.entry_id == entry_id
-        )
+        active = self.summary_jobs.get(entry_id)
+        return active is not None and active["job"].job_id == job_id
 
     def _is_current_entry(self, entry_id: str) -> bool:
         if not self.current_article or not entry_id:
@@ -2970,7 +3633,7 @@ class MercuryMainWindow(QMainWindow):
             return
 
         store = self._summary_store()
-        target_lang = self._resolve_target_language()
+        target_lang = self._resolve_translation_language()
         items: list = []
         from mercury.agent.summary.batch_worker import BatchSummaryItem
         from mercury.agent.summary.summary_agent import SummaryRequest
@@ -3076,6 +3739,7 @@ class MercuryMainWindow(QMainWindow):
             # If the saved entry is the one currently open, refresh the panel.
             if self._is_current_entry(outcome.entry_id):
                 self._restore_summary_for_article(self.current_article)
+                self._auto_expand_agent_panel()
 
         if dialog is not None:
             dialog.update_outcome(idx, outcome.ok, outcome.title, detail)
@@ -3090,10 +3754,6 @@ class MercuryMainWindow(QMainWindow):
     def on_translate(self) -> None:
         if not self.current_article:
             return
-        if self.translation_thread is not None and self.translation_worker is not None:
-            self.translation_worker.request_cancel()
-            self.summary_text.setText("正在取消翻译…")
-            return
 
         agent = self._ensure_translation_agent()
         if agent is None:
@@ -3101,22 +3761,50 @@ class MercuryMainWindow(QMainWindow):
 
         article = self.current_article
         entry_id = getattr(article, "entry_id", "") or getattr(article, "url", "") or ""
+        existing = self.translation_jobs.get(entry_id)
+        if existing is not None:
+            existing["worker"].request_cancel()
+            if self._is_current_entry(entry_id):
+                self.summary_text.setText("正在取消翻译…")
+            return
+
         content = self._translation_input_for(article)
         if not content.strip():
             self._show_error_dialog("无法翻译", "当前文章没有可用的正文。")
             return
 
-        target_lang = self._resolve_target_language()
+        target_lang = self._resolve_translation_language()
 
         from mercury.agent.translation.translation_agent import TranslationRequest
+        from mercury.agent.translation.segmenter import segment_markdown
         from mercury.agent.translation.translation_worker import (
             TranslationJob,
             TranslationWorker,
         )
 
+        source_segments = segment_markdown(content)
+        source_hashes = {
+            segment.position: segment.source_hash for segment in source_segments
+        }
+        cached_segments = self._load_current_translation_segments(entry_id, target_lang)
+        current_hashes = set(source_hashes.values())
+        completed_hashes = {
+            str(segment.get("source_hash") or "")
+            for segment in cached_segments
+            if str(segment.get("source_hash") or "") in current_hashes
+        }
+        initial_buffer = [
+            segment for segment in cached_segments
+            if str(segment.get("source_hash") or "") in completed_hashes
+        ]
+
         self.translation_job_counter += 1
         job = TranslationJob(job_id=self.translation_job_counter, entry_id=entry_id)
         self.translation_active_job = job
+        self.translation_source_hashes = source_hashes
+        self.translation_segments_buffer = list(initial_buffer)
+        self.translation_hashes_by_job[(job.job_id, entry_id)] = source_hashes
+        self.translation_buffers[(job.job_id, entry_id)] = list(initial_buffer)
 
         request = TranslationRequest(
             entry_id=entry_id,
@@ -3126,7 +3814,7 @@ class MercuryMainWindow(QMainWindow):
         )
 
         thread = QThread(self)
-        worker = TranslationWorker(agent, request, job)
+        worker = TranslationWorker(agent, request, job, completed_hashes)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.started.connect(self._on_translation_started)
@@ -3140,12 +3828,24 @@ class MercuryMainWindow(QMainWindow):
         worker.cancelled.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._clear_translation_worker)
+        thread.finished.connect(
+            lambda job_id=job.job_id, eid=entry_id: self._clear_translation_worker_for(job_id, eid)
+        )
 
         self.translation_thread = thread
         self.translation_worker = worker
+        self.translation_jobs[entry_id] = {"thread": thread, "worker": worker, "job": job}
         thread.start()
         self.summary_text.setText("正在翻译…")
+
+    def _load_current_translation_segments(self, entry_id: str, target_lang: str) -> list[dict]:
+        store = self._translation_store()
+        if store is None or not entry_id:
+            return []
+        try:
+            return store.get_segments(entry_id, target_lang)
+        except Exception:
+            return []
 
     def _ensure_translation_agent(self):
         """Return a translation agent, or None after showing a config dialog."""
@@ -3174,10 +3874,11 @@ class MercuryMainWindow(QMainWindow):
     def _on_translation_started(self, job_id: int, entry_id: str, total: int) -> None:
         if not self._is_active_translation_job(job_id, entry_id):
             return
-        self.translation_segments_buffer = []
-        self.summary_text.setText(f"翻译中… 0/{total} 段")
-        self._render_summary_panel("")
-        self._auto_expand_summary_panel()
+        if self._is_current_entry(entry_id):
+            buffer = self.translation_buffers.get((job_id, entry_id), [])
+            self.summary_text.setText(f"翻译中… {len(buffer)}/{total} 段")
+            self._render_translation_panel(self._format_translation_markdown(buffer))
+            self._auto_expand_agent_panel()
 
     @Slot(int, str, int, str, str, int, int)
     def _on_translation_token(
@@ -3192,35 +3893,41 @@ class MercuryMainWindow(QMainWindow):
     ) -> None:
         if not self._is_active_translation_job(job_id, entry_id):
             return
-        self._append_translation_token(position, source_text, chunk)
+        self._append_translation_token(job_id, entry_id, position, source_text, chunk)
         if self._is_current_entry(entry_id):
+            buffer = self.translation_buffers.get((job_id, entry_id), [])
             translated_chars = sum(
                 len(str(segment.get("trans_text") or ""))
-                for segment in self.translation_segments_buffer
+                for segment in buffer
             )
             self.summary_text.setText(
                 f"翻译中… 第 {current}/{total} 段，{translated_chars} 字"
             )
-            self._render_summary_panel(
-                self._format_translation_markdown(self.translation_segments_buffer)
+            self._render_translation_panel(
+                self._format_translation_markdown(buffer)
             )
 
     def _append_translation_token(
-        self, position: int, source_text: str, chunk: str
+        self, job_id: int, entry_id: str, position: int, source_text: str, chunk: str
     ) -> None:
-        for segment in self.translation_segments_buffer:
+        key = (job_id, entry_id)
+        buffer = self.translation_buffers.setdefault(key, [])
+        source_hashes = self.translation_hashes_by_job.get(key, {})
+        for segment in buffer:
             if segment.get("position") == position:
                 segment["trans_text"] = str(segment.get("trans_text") or "") + chunk
                 return
-        self.translation_segments_buffer.append(
+        buffer.append(
             {
-                "source_hash": "",
+                "source_hash": source_hashes.get(position, ""),
                 "source_text": source_text,
                 "trans_text": chunk,
                 "position": position,
             }
         )
-        self.translation_segments_buffer.sort(key=lambda item: item.get("position", 0))
+        buffer.sort(key=lambda item: item.get("position", 0))
+        if self.translation_active_job is not None and self.translation_active_job.job_id == job_id:
+            self.translation_segments_buffer = buffer
 
     @Slot(int, str, int, int)
     def _on_translation_progress(
@@ -3228,6 +3935,7 @@ class MercuryMainWindow(QMainWindow):
     ) -> None:
         if not self._is_active_translation_job(job_id, entry_id):
             return
+        self._save_translation_buffer(job_id, entry_id)
         if self._is_current_entry(entry_id):
             self.summary_text.setText(f"翻译中… {current}/{total} 段")
 
@@ -3244,17 +3952,21 @@ class MercuryMainWindow(QMainWindow):
             }
             for segment in result.segments
         ]
-        self.translation_segments_buffer = segments
+        existing = self.translation_buffers.get((job_id, entry_id), [])
+        merged = self._merge_translation_segments(existing, segments)
+        self.translation_buffers[(job_id, entry_id)] = merged
+        if self.translation_active_job is not None and self.translation_active_job.job_id == job_id:
+            self.translation_segments_buffer = merged
         store = self._translation_store()
-        if store is not None and segments:
+        if store is not None and merged:
             try:
-                store.save_segments(entry_id, segments, result.target_language)
+                store.save_segments(entry_id, merged, result.target_language)
             except Exception as exc:
                 self._show_error_dialog("翻译保存失败", str(exc))
         if self._is_current_entry(entry_id):
-            self.summary_text.setText(f"翻译完成：{len(segments)} 段")
-            self._render_summary_panel(self._format_translation_markdown(segments))
-            self._auto_expand_summary_panel()
+            self.summary_text.setText(f"翻译完成：{len(merged)} 段")
+            self._render_translation_panel(self._format_translation_markdown(merged))
+            self._auto_expand_agent_panel()
 
     @Slot(int, str, str)
     def _on_translation_failed(self, job_id: int, entry_id: str, message: str) -> None:
@@ -3262,7 +3974,7 @@ class MercuryMainWindow(QMainWindow):
             return
         if self._is_current_entry(entry_id):
             self.summary_text.setText("翻译失败。")
-        self._show_error_dialog("翻译失败", message)
+            self._show_error_dialog("翻译失败", message)
 
     @Slot(int, str)
     def _on_translation_cancelled(self, job_id: int, entry_id: str) -> None:
@@ -3277,14 +3989,50 @@ class MercuryMainWindow(QMainWindow):
         self.translation_worker = None
         self.translation_active_job = None
         self.translation_segments_buffer = []
+        self.translation_source_hashes = {}
+
+    def _clear_translation_worker_for(self, job_id: int, entry_id: str) -> None:
+        active = self.translation_jobs.get(entry_id)
+        if active is not None and active["job"].job_id == job_id:
+            self.translation_jobs.pop(entry_id, None)
+        self.translation_buffers.pop((job_id, entry_id), None)
+        self.translation_hashes_by_job.pop((job_id, entry_id), None)
+        if self.translation_active_job is not None and self.translation_active_job.job_id == job_id:
+            self._clear_translation_worker()
+
+    def _save_translation_buffer(self, job_id: int, entry_id: str) -> None:
+        store = self._translation_store()
+        if store is None or not entry_id:
+            return
+        buffer = self.translation_buffers.get((job_id, entry_id), [])
+        segments = [
+            segment for segment in buffer
+            if str(segment.get("source_hash") or "").strip()
+            and str(segment.get("source_text") or "").strip()
+            and str(segment.get("trans_text") or "").strip()
+        ]
+        if not segments:
+            return
+        try:
+            store.save_segments(entry_id, segments, self._resolve_translation_language())
+        except Exception:
+            pass
+
+    @staticmethod
+    def _merge_translation_segments(existing: list[dict], new_segments: list[dict]) -> list[dict]:
+        merged: dict[int, dict] = {}
+        for segment in existing + new_segments:
+            try:
+                position = int(segment.get("position", len(merged)))
+            except Exception:
+                position = len(merged)
+            if str(segment.get("trans_text") or "").strip():
+                merged[position] = dict(segment)
+        return [merged[key] for key in sorted(merged)]
 
     def _is_active_translation_job(self, job_id: int, entry_id: str) -> bool:
-        active = self.translation_active_job
-        return (
-            active is not None
-            and active.job_id == job_id
-            and active.entry_id == entry_id
-        )
+        active = self.translation_jobs.get(entry_id)
+        return active is not None and active["job"].job_id == job_id
 
     def on_open_settings(self) -> None:
         store = self._settings_store_or_none()

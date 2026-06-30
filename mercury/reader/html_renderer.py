@@ -100,6 +100,8 @@ img {
 }
 pre {
   overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   padding: 16px;
   background: #f2f0ea;
   border: 1px solid #e4ded3;
@@ -190,6 +192,8 @@ img {
 }
 pre {
   overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   padding: 14px;
   background: #f6f8fa;
 }
@@ -274,6 +278,17 @@ def _style_reader_blocks(html: str, *, title: str = "") -> str:
         if _is_duplicate_heading(heading.get_text(" ", strip=True), title_key, title_words):
             heading.decompose()
 
+    for pre in list(soup.find_all("pre")):
+        text = pre.get_text("\n", strip=False).strip("\n")
+        if not _looks_like_prose_code_block(text):
+            continue
+        replacement = soup.new_tag("div")
+        for block in [part.strip() for part in text.split("\n\n") if part.strip()]:
+            paragraph = soup.new_tag("p")
+            paragraph.string = " ".join(line.strip() for line in block.splitlines())
+            replacement.append(paragraph)
+        pre.replace_with(replacement)
+
     previous_text = ""
     next_paragraph_is_caption = False
     for paragraph in soup.find_all("p"):
@@ -329,6 +344,40 @@ def _style_reader_blocks(html: str, *, title: str = "") -> str:
             "color:#7b8088;font-size:14px;line-height:1.48;text-align:center;"
         )
     return str(soup)
+
+
+def _looks_like_prose_code_block(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or "\t" in stripped:
+        return False
+    lowered = stripped.lower()
+    code_markers = (
+        "def ",
+        "class ",
+        "import ",
+        "from ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "#include",
+        "{",
+        "};",
+        "</",
+        "<script",
+    )
+    if any(marker in lowered for marker in code_markers):
+        return False
+    words = stripped.split()
+    if len(words) < 12:
+        return False
+    sentence_marks = sum(stripped.count(mark) for mark in ".?!。！？")
+    has_article_shape = (
+        "\n\n" in stripped
+        or ":" in stripped
+        or any(line.strip().startswith(("http://", "https://")) for line in stripped.splitlines())
+    )
+    return sentence_marks >= 1 or has_article_shape
 
 
 def _caption_text(text: str) -> str:

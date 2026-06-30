@@ -109,16 +109,16 @@ def _external_link_callback(attrs: dict, new: bool = False) -> dict:
 
 
 def _best_image_url(tag: object) -> str:
-    for attr in ("src", "data-src", "data-original", "data-lazy-src", "data-url"):
-        value = tag.get(attr) if hasattr(tag, "get") else None
-        if value:
-            return str(value).strip()
-
     for attr in ("srcset", "data-srcset"):
         value = tag.get(attr) if hasattr(tag, "get") else None
-        candidate = _first_srcset_url(str(value)) if value else ""
+        candidate = _best_srcset_url(str(value)) if value else ""
         if candidate:
             return candidate
+
+    for attr in ("data-src", "data-original", "data-lazy-src", "data-url", "src"):
+        value = tag.get(attr) if hasattr(tag, "get") else None
+        if value and not _is_placeholder_image_url(str(value)):
+            return str(value).strip()
 
     parent = getattr(tag, "parent", None)
     while parent is not None:
@@ -126,7 +126,7 @@ def _best_image_url(tag: object) -> str:
             for source in parent.find_all("source"):
                 for attr in ("srcset", "data-srcset"):
                     value = source.get(attr)
-                    candidate = _first_srcset_url(str(value)) if value else ""
+                    candidate = _best_srcset_url(str(value)) if value else ""
                     if candidate:
                         return candidate
             break
@@ -134,9 +134,25 @@ def _best_image_url(tag: object) -> str:
     return ""
 
 
-def _first_srcset_url(srcset: str) -> str:
+def _best_srcset_url(srcset: str) -> str:
+    candidates: list[tuple[int, str]] = []
     for item in srcset.split(","):
         parts = item.strip().split()
-        if parts:
-            return parts[0]
-    return ""
+        if not parts or _is_placeholder_image_url(parts[0]):
+            continue
+        width = 0
+        if len(parts) > 1 and parts[1].endswith("w"):
+            width_text = parts[1][:-1]
+            width = int(width_text) if width_text.isdigit() else 0
+        candidates.append((width, parts[0]))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
+def _is_placeholder_image_url(url: str) -> bool:
+    lowered = url.strip().lower()
+    if not lowered or lowered.startswith("data:"):
+        return True
+    markers = ("placeholder", "spacer", "transparent", "blank.gif", "1x1", "pixel")
+    return any(marker in lowered for marker in markers)
