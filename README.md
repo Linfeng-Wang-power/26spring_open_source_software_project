@@ -1,6 +1,6 @@
-# Mercury PySide6 RSS Reader
+# Lumen PySide6 RSS Reader
 
-Mercury PySide6 RSS Reader 是一个本地优先的跨平台桌面 RSS 阅读器原型，应用窗口标题为 `Lumen`。项目使用 Python 与 PySide6 构建，支持订阅源管理、OPML 导入、文章阅读、正文清洗、标签、收藏、已读/未读、摘要与翻译等功能。
+Lumen PySide6 RSS Reader 是一个本地优先的跨平台桌面 RSS 阅读器原型，应用窗口标题为 `Lumen`。项目使用 Python 与 PySide6 构建，支持订阅源管理、OPML 导入、文章阅读、正文清洗、标签、收藏、已读/未读、摘要与翻译等功能。
 
 项目目标是做一个无需注册、无需登录、默认本地存储、可接入 OpenAI-compatible 大模型 Provider 的桌面阅读工具。
 
